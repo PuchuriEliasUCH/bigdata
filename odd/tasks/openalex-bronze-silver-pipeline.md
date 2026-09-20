@@ -38,13 +38,18 @@ The team needs a reproducible Spark environment with no local Spark installation
 - [x] OAX-004 Create a Jupyter notebook that evidences Bronze and Silver data, quality outcomes, and batch metadata without exposing the token.
   - Acceptance: notebook runs in the same Docker image and displays counts, schemas, samples, and rejected-record reasons.
   - Checks: notebook syntax/execution check where Docker is available.
+- [x] OAX-005 Reject OpenAlex work IDs already accepted in a previous completed Silver batch.
+  - Reason reopened: the initial implementation deduplicates only inside the current Bronze batch, so incremental runs can repeat a work already present in Silver.
+  - Acceptance: duplicate work IDs across batches become auditable rejected rows with a distinct reason and are not written again to Silver.
+  - Checks: a failing cross-batch PySpark test before implementation, then the full container test suite.
 
 ## Progress and evidence
 
-- Status: completed.
+- Status: complete.
 - Initial repository state: Git repository with untracked `.env` and `.gitpeek`; no source files yet.
 - TDD evidence: tests were authored before implementation. The host lacked pytest; Docker verification passed with `9 passed in 13.45s`.
-- Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed; parent spot check `docker compose -f compose.yaml run --build --rm --no-deps spark-pipeline pytest -q` passed with `9 passed in 12.46s`. No live 200,000-record ingestion was run.
+- OAX-005 TDD evidence: the focused two-batch PySpark regression test failed before implementation with `1 failed, 2 deselected in 11.99s` because the duplicate was accepted; after implementation it passed with `1 passed, 2 deselected in 14.39s`.
+- Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed; `docker compose -f compose.yaml run --build --rm --no-deps spark-pipeline pytest -q` passed with `10 passed in 16.62s`. No live 200,000-record ingestion was run.
 - Implementation commit: `9270797 feat(openalex): add scheduled bronze silver pipeline`.
 - RDD: disabled globally; no native review was started.
-- Next step: configure the desired query scope and run the first scheduled or manual ingestion from Docker.
+- OAX-005 implementation: previous completed Silver batch IDs are anti-joined from current accepted rows; cross-batch duplicates are written to the current Bronze rejected output as `duplicate_openalex_id_previous_batch`, while invalid prior records do not reserve IDs.

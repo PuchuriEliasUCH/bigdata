@@ -268,6 +268,7 @@ def _process_one_batch(
     bronze_root: Path,
     silver_root: Path,
     metadata: dict[str, Any],
+    previous_silver_paths: tuple[Path, ...] = (),
 ) -> tuple[int, int]:
     batch_id = str(metadata["batch_id"])
     rows = _load_batch_rows(bronze_root, metadata)
@@ -284,7 +285,25 @@ def _process_one_batch(
         "rejection_reason", F.lit("duplicate_openalex_id")
     )
     accepted = ranked.filter(F.col("_duplicate_rank") == 1).drop("_duplicate_rank")
+    cross_batch_duplicates: DataFrame | None = None
+    if previous_silver_paths:
+        # Silver contains only validated rows, and completed paths exclude the current batch.
+        previous_ids = (
+            spark.read.parquet(*(str(path) for path in previous_silver_paths))
+            .select("openalex_id")
+            .where(F.col("openalex_id").isNotNull())
+            .distinct()
+        )
+        cross_batch_duplicates = accepted.join(
+            previous_ids, on="openalex_id", how="left_semi"
+        ).withColumn(
+            "rejection_reason", F.lit("duplicate_openalex_id_previous_batch")
+        )
+        accepted = accepted.join(previous_ids, on="openalex_id", how="left_anti")
+
     rejected = _rejected_columns(invalid).unionByName(_rejected_columns(duplicates))
+    if cross_batch_duplicates is not None:
+        rejected = rejected.unionByName(_rejected_columns(cross_batch_duplicates))
 
     processed_at = datetime.now(timezone.utc).isoformat()
     silver_path = silver_root / "works" / batch_id
@@ -316,6 +335,7 @@ def process_pending_batches(
     skipped: list[str] = []
     valid_rows = 0
     rejected_rows = 0
+    completed_silver_paths: list[Path] = []
     with _processing_lock(silver_path):
         for metadata in _completed_metadata(bronze_path):
             batch_id = str(metadata["batch_id"])
@@ -327,6 +347,7 @@ def process_pending_batches(
                     raise ProcessingError(f"Unable to read processing state for {batch_id}") from exc
                 if state.get("status") == "completed":
                     skipped.append(batch_id)
+                    completed_silver_paths.append(silver_path / "works" / batch_id)
                     continue
 
             _write_json_atomic(
@@ -343,6 +364,7 @@ def process_pending_batches(
                     bronze_path,
                     silver_path,
                     metadata,
+                    tuple(completed_silver_paths),
                 )
             except Exception as exc:
                 _write_json_atomic(
@@ -365,6 +387,7 @@ def process_pending_batches(
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
+            completed_silver_paths.append(silver_path / "works" / batch_id)
             processed.append(batch_id)
             valid_rows += batch_valid
             rejected_rows += batch_rejected

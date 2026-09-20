@@ -28,7 +28,7 @@ def write_completed_batch(bronze_root: Path, batch_id: str, records):
     raw_dir = bronze_root / "openalex" / batch_id
     metadata_dir = bronze_root / "batch_metadata"
     raw_dir.mkdir(parents=True)
-    metadata_dir.mkdir(parents=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
     (raw_dir / "page-000001.json").write_text(
         json.dumps({"meta": {"next_cursor": None}, "results": records}),
@@ -133,3 +133,54 @@ def test_completed_batch_is_not_reprocessed(spark, tmp_path):
         )
     )
     assert state["status"] == "completed"
+
+
+def test_previous_batch_duplicate_is_rejected_without_using_invalid_ids(spark, tmp_path):
+    bronze_root = tmp_path / "bronze"
+    silver_root = tmp_path / "silver"
+    valid_record = {
+        "id": "https://openalex.org/W20",
+        "title": "A valid work",
+        "publication_year": 2024,
+        "publication_date": "2024-05-10",
+        "topics": [{"display_name": "Data Engineering"}],
+        "type": "article",
+    }
+    invalid_record = {**valid_record, "id": "https://openalex.org/W21"}
+    invalid_record.pop("title")
+    write_completed_batch(bronze_root, "batch-001", [valid_record, invalid_record])
+
+    duplicate_record = {**valid_record, "title": "Repeated work"}
+    newly_valid_record = {
+        **valid_record,
+        "id": "https://openalex.org/W21",
+        "title": "Previously invalid work",
+    }
+    write_completed_batch(
+        bronze_root,
+        "batch-002",
+        [duplicate_record, newly_valid_record],
+    )
+
+    summary = process_pending_batches(spark, bronze_root, silver_root)
+
+    assert summary.processed_batches == ("batch-001", "batch-002")
+    assert summary.valid_rows == 2
+    assert summary.rejected_rows == 2
+
+    first_batch_rows = spark.read.parquet(str(silver_root / "works" / "batch-001")).collect()
+    assert [row["openalex_id"] for row in first_batch_rows] == [
+        "https://openalex.org/W20"
+    ]
+    second_batch_rows = spark.read.parquet(str(silver_root / "works" / "batch-002")).collect()
+    assert [row["openalex_id"] for row in second_batch_rows] == [
+        "https://openalex.org/W21"
+    ]
+
+    first_rejected = spark.read.json(str(bronze_root / "rejected" / "batch-001")).collect()
+    assert len(first_rejected) == 1
+    assert "missing_title" in first_rejected[0]["rejection_reason"]
+    second_rejected = spark.read.json(str(bronze_root / "rejected" / "batch-002")).collect()
+    assert len(second_rejected) == 1
+    assert second_rejected[0]["openalex_id"] == "https://openalex.org/W20"
+    assert second_rejected[0]["rejection_reason"] == "duplicate_openalex_id_previous_batch"
