@@ -1,0 +1,50 @@
+# Automated OpenAlex Bronze-to-Silver Pipeline
+
+## Objective
+
+Build a Docker-based, scheduled data pipeline that retrieves an initial 200,000 OpenAlex works into Bronze and processes them with Spark into cleaned Silver datasets. Every later scheduled run retrieves up to 1,000 new works.
+
+## Problem and scope
+
+The team needs a reproducible Spark environment with no local Spark installation. This first exercise covers automated OpenAlex ingestion and Bronze-to-Silver cleansing only. Gold analytics, trend prediction, and additional sources are explicitly out of scope.
+
+## Constraints
+
+- Use `compose.yaml`, not `docker-compose.yml`.
+- Read the API token from the existing `OPENALEX_TOKEN` environment variable.
+- Run ingestion every two minutes for the exercise.
+- Add explanatory English comments to configuration, Python code, tests, and the evidence notebook.
+- Follow TDD: capture a failing test before implementing each behavior, then make it pass.
+- Keep the initial dataset at least 200,000 records; incremental runs request at most 1,000 records.
+
+## Delivery strategy
+
+- Route: delegated direct.
+- Trigger evidence: the implementation spans Docker configuration, scheduling, Python ingestion, PySpark processing, tests, and a notebook.
+- TDD mode: enabled by explicit user instruction; test runner to be established during implementation.
+- Work-unit commit: required after verification. Git is available; commit only the implementation files created for this feature.
+
+## Tasks
+
+- [x] OAX-001 Create the Docker runtime, dependency manifest, schedule, and safe environment configuration.
+  - Acceptance: `docker compose config` validates and the scheduled command is visible in the container configuration.
+  - Checks: Compose validation; configuration tests where applicable.
+- [x] OAX-002 Implement test-driven OpenAlex ingestion into batch-partitioned Bronze storage.
+  - Acceptance: first-run mode continues cursor pagination until at least 200,000 records are persisted; incremental mode caps the request at 1,000 records and preserves raw payloads plus batch metadata.
+  - Checks: unit tests with mocked OpenAlex responses, including pagination and token validation.
+- [x] OAX-003 Implement test-driven Spark validation, deduplication, rejection, and Parquet Silver output.
+  - Acceptance: valid records with required fields become Silver rows; invalid or duplicate records are auditable in rejected output; processed batches are not repeated.
+  - Checks: PySpark tests using temporary local storage.
+- [x] OAX-004 Create a Jupyter notebook that evidences Bronze and Silver data, quality outcomes, and batch metadata without exposing the token.
+  - Acceptance: notebook runs in the same Docker image and displays counts, schemas, samples, and rejected-record reasons.
+  - Checks: notebook syntax/execution check where Docker is available.
+
+## Progress and evidence
+
+- Status: completed.
+- Initial repository state: Git repository with untracked `.env` and `.gitpeek`; no source files yet.
+- TDD evidence: tests were authored before implementation. The host lacked pytest; Docker verification passed with `9 passed in 13.45s`.
+- Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed. No live 200,000-record ingestion was run.
+- Implementation commit: `9270797 feat(openalex): add scheduled bronze silver pipeline`.
+- RDD: disabled globally; no native review was started.
+- Next step: configure the desired query scope and run the first scheduled or manual ingestion from Docker.
