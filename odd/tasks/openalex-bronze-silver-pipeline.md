@@ -50,6 +50,6 @@ The team needs a reproducible Spark environment with no local Spark installation
 - TDD evidence: tests were authored before implementation. The host lacked pytest; Docker verification passed with `9 passed in 13.45s`.
 - OAX-005 TDD evidence: the focused two-batch PySpark regression test failed before implementation with `1 failed, 2 deselected in 11.99s` because the duplicate was accepted; after implementation it passed with `1 passed, 2 deselected in 14.39s`.
 - Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed; `docker compose -f compose.yaml run --build --rm --no-deps spark-pipeline pytest -q` passed with `10 passed in 16.62s`. No live 200,000-record ingestion was run.
-- Implementation commit: `9270797 feat(openalex): add scheduled bronze silver pipeline`.
+- Implementation commits: `9270797 feat(openalex): add scheduled bronze silver pipeline`; `c488599 fix(openalex): reject IDs across Silver batches` (OAX-005).
 - RDD: disabled globally; no native review was started.
 - OAX-005 implementation: previous completed Silver batch IDs are anti-joined from current accepted rows; cross-batch duplicates are written to the current Bronze rejected output as `duplicate_openalex_id_previous_batch`, while invalid prior records do not reserve IDs.
