@@ -1,0 +1,2 @@
+# The two-minute cadence is intentionally only the base exercise schedule.
+*/2 * * * * cd /app && /usr/local/bin/python -m src.run_pipeline

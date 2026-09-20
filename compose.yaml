@@ -1,0 +1,19 @@
+services:
+  spark-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      BRONZE_PATH: /data/bronze
+      SILVER_PATH: /data/silver
+      TZ: UTC
+    volumes:
+      - ./data:/data
+      - ./notebooks:/app/notebooks:ro
+    ports:
+      - "8888:8888"
+    restart: unless-stopped
+    # The entrypoint keeps Jupyter available while PID 1 supervises the batch schedule.
+    command: ["sh", "/app/docker/entrypoint.sh"]
