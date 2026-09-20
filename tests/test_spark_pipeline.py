@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import src.spark_pipeline as spark_pipeline
 from src.spark_pipeline import process_pending_batches
 
 
@@ -103,6 +104,42 @@ def test_processing_validates_normalizes_deduplicates_and_rejects(spark, tmp_pat
     assert "duplicate_openalex_id" in reasons
     assert any("missing_title" in reason for reason in reasons)
     assert any("missing_topics" in reason for reason in reasons)
+
+
+def test_processing_reads_raw_pages_without_driver_row_list(spark, tmp_path, monkeypatch):
+    bronze_root = tmp_path / "bronze"
+    silver_root = tmp_path / "silver"
+    write_completed_batch(
+        bronze_root,
+        "spark-native",
+        [
+            {
+                "id": "https://openalex.org/W11",
+                "title": "Spark-native work",
+                "publication_year": 2024,
+                "topics": [{"display_name": "Distributed Systems"}],
+            }
+        ],
+    )
+
+    def fail_if_python_rows_are_loaded(*args, **kwargs):
+        raise AssertionError("Bronze records must not be loaded into a Python list")
+
+    # This guard fails against the old driver-side loader while the raw page
+    # remains the only input used by the processing path.
+    monkeypatch.setattr(
+        spark_pipeline,
+        "_load_batch_rows",
+        fail_if_python_rows_are_loaded,
+        raising=False,
+    )
+
+    summary = process_pending_batches(spark, bronze_root, silver_root)
+
+    assert summary.processed_batches == ("spark-native",)
+    assert summary.valid_rows == 1
+    assert summary.rejected_rows == 0
+    assert spark.read.parquet(str(silver_root / "works" / "spark-native")).count() == 1
 
 
 def test_completed_batch_is_not_reprocessed(spark, tmp_path):

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     ArrayType,
@@ -58,74 +58,24 @@ RAW_SCHEMA = StructType(
 )
 
 
-def _text(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+RAW_PAGE_SCHEMA = StructType(
+    [
+        # Parsing each result as JSON text avoids inferring the highly variable
+        # OpenAlex record schema, including nested keys that differ by case.
+        StructField("results", ArrayType(StringType(), containsNull=True), True),
+    ]
+)
 
-
-def _integer(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
-    return None
-
-
-def _topic_values(value: Any) -> tuple[list[str], list[str]]:
-    topic_ids: list[str] = []
-    topic_names: list[str] = []
-    if not isinstance(value, list):
-        return topic_ids, topic_names
-    for topic in value:
-        if isinstance(topic, dict):
-            topic_id = _text(topic.get("id"))
-            topic_name = _text(topic.get("display_name")) or _text(topic.get("name"))
-            if topic_id:
-                topic_ids.append(topic_id)
-            if topic_name:
-                topic_names.append(topic_name)
-        elif isinstance(topic, str) and topic.strip():
-            topic_names.append(topic.strip())
-    return topic_ids, topic_names
-
-
-def _source_name(record: dict[str, Any]) -> str | None:
-    primary_location = record.get("primary_location")
-    if not isinstance(primary_location, dict):
-        return None
-    source = primary_location.get("source")
-    if not isinstance(source, dict):
-        return None
-    return _text(source.get("display_name"))
-
-
-def _normalize_record(batch_id: str, record_order: int, record: Any) -> dict[str, Any]:
-    if not isinstance(record, dict):
-        record = {"_invalid_record": record}
-    topic_ids, topic_names = _topic_values(record.get("topics"))
-    open_access = record.get("open_access")
-    is_oa = open_access.get("is_oa") if isinstance(open_access, dict) else None
-    if not isinstance(is_oa, bool):
-        is_oa = None
-    return {
-        "batch_id": batch_id,
-        "record_order": record_order,
-        "record_json": json.dumps(record, ensure_ascii=False, sort_keys=True),
-        "openalex_id": _text(record.get("id")),
-        "title": _text(record.get("title")),
-        "publication_year": _integer(record.get("publication_year")),
-        "publication_date": _text(record.get("publication_date")),
-        "topic_ids": topic_ids,
-        "topic_names": topic_names,
-        "work_type": _text(record.get("type")),
-        "doi": _text(record.get("doi")),
-        "cited_by_count": _integer(record.get("cited_by_count")),
-        "is_oa": is_oa,
-        "source_name": _source_name(record),
-    }
+TOPIC_SCHEMA = ArrayType(
+    StructType(
+        [
+            StructField("id", StringType(), True),
+            StructField("display_name", StringType(), True),
+            StructField("name", StringType(), True),
+        ]
+    ),
+    containsNull=True,
+)
 
 
 def _raw_page_paths(bronze_root: Path, metadata: dict[str, Any]) -> list[Path]:
@@ -142,22 +92,91 @@ def _raw_page_paths(bronze_root: Path, metadata: dict[str, Any]) -> list[Path]:
     return sorted(raw_page_dir.glob("page-*.json"))
 
 
-def _load_batch_rows(bronze_root: Path, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+def _load_batch_dataframe(
+    spark: SparkSession, bronze_root: Path, metadata: dict[str, Any]
+) -> DataFrame:
     batch_id = str(metadata["batch_id"])
-    rows: list[dict[str, Any]] = []
-    record_order = 0
-    for page_path in _raw_page_paths(bronze_root, metadata):
-        try:
-            payload = json.loads(page_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ProcessingError(f"Unable to read Bronze page {page_path.name}") from exc
-        results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list):
-            raise ProcessingError(f"Bronze page {page_path.name} has no results list")
-        for record in results:
-            rows.append(_normalize_record(batch_id, record_order, record))
-            record_order += 1
-    return rows
+    page_paths = _raw_page_paths(bronze_root, metadata)
+    if not page_paths:
+        raise ProcessingError(f"Bronze batch {batch_id} has no raw page files")
+    for page_path in page_paths:
+        if not page_path.is_file():
+            raise ProcessingError(f"Unable to read Bronze page {page_path.name}")
+
+    pages = (
+        spark.read.option("wholetext", "true")
+        .text([str(path) for path in page_paths])
+        .withColumn("_page_path", F.input_file_name())
+        .withColumn("_page", F.from_json(F.col("value"), RAW_PAGE_SCHEMA))
+    )
+    invalid_page = pages.filter(
+        F.col("_page").isNull() | F.col("_page.results").isNull()
+    ).select("_page_path").first()
+    if invalid_page is not None:
+        page_name = str(invalid_page["_page_path"]).rsplit("/", 1)[-1]
+        raise ProcessingError(f"Bronze page {page_name} has no results list")
+
+    records = pages.select(
+        "_page_path",
+        F.posexplode(F.col("_page.results")).alias("_record_index", "_record_json"),
+    )
+    records = records.withColumn(
+        "_topics",
+        F.coalesce(
+            F.from_json(F.get_json_object(F.col("_record_json"), "$.topics"), TOPIC_SCHEMA),
+            F.array().cast(TOPIC_SCHEMA),
+        ),
+    )
+    topic_ids = F.expr(
+        "filter(transform(_topics, topic -> trim(topic.id)), "
+        "topic -> topic is not null and topic <> '')"
+    )
+    topic_names = F.expr(
+        "filter(transform(_topics, topic -> "
+        "case when topic.display_name is not null and trim(topic.display_name) <> '' "
+        "then trim(topic.display_name) else trim(topic.name) end), "
+        "topic -> topic is not null and topic <> '')"
+    )
+
+    def json_value(path: str) -> F.Column:
+        return F.get_json_object(F.col("_record_json"), path)
+
+    publication_year_text = F.trim(json_value("$.publication_year"))
+    cited_by_count_text = F.trim(json_value("$.cited_by_count"))
+    is_oa_text = json_value("$.open_access.is_oa")
+    page_number = F.regexp_extract(F.col("_page_path"), r"page-(\d+)\.json$", 1).cast(
+        IntegerType()
+    )
+    # Bronze ingestion caps each page at 200 records, so this keeps page order
+    # deterministic without globally sorting rows that still carry record_json.
+    record_order = F.when(
+        page_number > 0,
+        (page_number - F.lit(1)) * F.lit(1000) + F.col("_record_index"),
+    ).otherwise(F.col("_record_index"))
+    return records.select(
+        F.lit(batch_id).alias("batch_id"),
+        record_order.cast(IntegerType()).alias("record_order"),
+        F.coalesce(F.col("_record_json"), F.lit("null")).alias("record_json"),
+        F.trim(json_value("$.id")).alias("openalex_id"),
+        F.trim(json_value("$.title")).alias("title"),
+        F.when(
+            publication_year_text.rlike(r"^-?\d+$"),
+            publication_year_text.cast(IntegerType()),
+        ).alias("publication_year"),
+        F.trim(json_value("$.publication_date")).alias("publication_date"),
+        topic_ids.alias("topic_ids"),
+        topic_names.alias("topic_names"),
+        F.trim(json_value("$.type")).alias("work_type"),
+        F.trim(json_value("$.doi")).alias("doi"),
+        F.when(
+            cited_by_count_text.rlike(r"^-?\d+$"),
+            cited_by_count_text.cast(LongType()),
+        ).alias("cited_by_count"),
+        F.when(is_oa_text.isin("true", "false"), is_oa_text.cast(BooleanType())).alias(
+            "is_oa"
+        ),
+        F.trim(json_value("$.primary_location.source.display_name")).alias("source_name"),
+    )
 
 
 def _validation_reason(dataframe: DataFrame) -> DataFrame:
@@ -271,20 +290,27 @@ def _process_one_batch(
     previous_silver_paths: tuple[Path, ...] = (),
 ) -> tuple[int, int]:
     batch_id = str(metadata["batch_id"])
-    rows = _load_batch_rows(bronze_root, metadata)
-    base = spark.createDataFrame(rows, schema=RAW_SCHEMA)
+    base = _load_batch_dataframe(spark, bronze_root, metadata)
     validated = _validation_reason(base)
     invalid = validated.filter(F.col("rejection_reason") != "")
     valid = validated.filter(F.col("rejection_reason") == "")
 
     # Keep the first occurrence deterministic and make later duplicates visible
     # in Bronze rejected rather than silently losing audit evidence.
-    window = Window.partitionBy("openalex_id").orderBy(F.col("record_order").asc())
-    ranked = valid.withColumn("_duplicate_rank", F.row_number().over(window))
-    duplicates = ranked.filter(F.col("_duplicate_rank") > 1).withColumn(
-        "rejection_reason", F.lit("duplicate_openalex_id")
+    first_record_orders = valid.groupBy("openalex_id").agg(
+        F.min("record_order").alias("_first_record_order")
     )
-    accepted = ranked.filter(F.col("_duplicate_rank") == 1).drop("_duplicate_rank")
+    duplicates = (
+        valid.join(first_record_orders, on="openalex_id")
+        .filter(F.col("record_order") != F.col("_first_record_order"))
+        .drop("_first_record_order")
+        .withColumn("rejection_reason", F.lit("duplicate_openalex_id"))
+    )
+    accepted = (
+        valid.join(first_record_orders, on="openalex_id")
+        .filter(F.col("record_order") == F.col("_first_record_order"))
+        .drop("_first_record_order")
+    )
     cross_batch_duplicates: DataFrame | None = None
     if previous_silver_paths:
         # Silver contains only validated rows, and completed paths exclude the current batch.
@@ -308,7 +334,12 @@ def _process_one_batch(
     processed_at = datetime.now(timezone.utc).isoformat()
     silver_path = silver_root / "works" / batch_id
     rejected_path = bronze_root / "rejected" / batch_id
-    _silver_columns(accepted, processed_at).write.mode("overwrite").parquet(str(silver_path))
+    (
+        _silver_columns(accepted, processed_at)
+        .write.mode("overwrite")
+        .option("compression", "snappy")
+        .parquet(str(silver_path))
+    )
     rejected.write.mode("overwrite").json(str(rejected_path))
     return accepted.count(), rejected.count()
 

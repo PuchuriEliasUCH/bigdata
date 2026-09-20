@@ -42,6 +42,10 @@ The team needs a reproducible Spark environment with no local Spark installation
   - Reason reopened: the initial implementation deduplicates only inside the current Bronze batch, so incremental runs can repeat a work already present in Silver.
   - Acceptance: duplicate work IDs across batches become auditable rejected rows with a distinct reason and are not written again to Silver.
   - Checks: a failing cross-batch PySpark test before implementation, then the full container test suite.
+- [x] OAX-006 Process large Bronze batches through Spark-native JSON reads instead of a driver-side Python row list.
+  - Reason reopened: the first live 200,000-record batch failed with `java.lang.OutOfMemoryError: Java heap space` while `spark.createDataFrame(rows, ...)` serialized the full Python list into the JVM.
+  - Acceptance: Spark reads raw Bronze pages directly, applies the same validation and duplicate rules, and processes the existing initial batch without driver-side materialization.
+  - Checks: a failing regression test that forbids the Python-list loading path, full container suite, and a manual Silver run over the preserved Bronze batch.
 
 ## Progress and evidence
 
@@ -53,3 +57,7 @@ The team needs a reproducible Spark environment with no local Spark installation
 - Implementation commits: `9270797 feat(openalex): add scheduled bronze silver pipeline`; `c488599 fix(openalex): reject IDs across Silver batches` (OAX-005).
 - RDD: disabled globally; no native review was started.
 - OAX-005 implementation: previous completed Silver batch IDs are anti-joined from current accepted rows; cross-batch duplicates are written to the current Bronze rejected output as `duplicate_openalex_id_previous_batch`, while invalid prior records do not reserve IDs.
+- OAX-006 diagnostic: the scheduled container was stopped after the initial live Silver attempt failed with `Py4JJavaError` caused by Java heap exhaustion. The Bronze batch remains preserved for post-fix processing.
+- OAX-006 implementation: Spark reads each Bronze `page-*.json` file with `wholetext`, expands `results` with `posexplode`, and performs normalization and validation with DataFrame expressions. Silver Parquet writes explicitly select Snappy compression; this is not treated as an OOM fix.
+- OAX-006 TDD evidence: the focused regression test failed against the old loader with `1 failed, 3 deselected in 2.95s` and passed after the change with `1 passed, 3 deselected in 9.23s`. The required Docker suite then passed with `11 passed in 16.88s`.
+- OAX-006 runtime proof: `docker compose ps` showed no running scheduler. The manual Silver-only `docker compose -f compose.yaml run --build --rm --no-deps spark-pipeline python -c ...` invocation did not ingest or call OpenAlex; both preserved batches were already completed, so it returned `processed_batches=[]`, `skipped_batches=[initial-20260920T135400858916Z-e25ea9d5, incremental-20260920T145400655181Z-92b80215]`, `valid_rows=0`, and `rejected_rows=0`. The states remained completed with initial `199984/16` valid/rejected and incremental `1000/0`; 4 Silver Parquet files existed.
