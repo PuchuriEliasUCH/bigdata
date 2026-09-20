@@ -44,7 +44,7 @@ The team needs a reproducible Spark environment with no local Spark installation
 - Status: completed.
 - Initial repository state: Git repository with untracked `.env` and `.gitpeek`; no source files yet.
 - TDD evidence: tests were authored before implementation. The host lacked pytest; Docker verification passed with `9 passed in 13.45s`.
-- Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed. No live 200,000-record ingestion was run.
+- Verification: `docker compose -f compose.yaml config` completed successfully without printing environment values; notebook static syntax/token check passed; parent spot check `docker compose -f compose.yaml run --build --rm --no-deps spark-pipeline pytest -q` passed with `9 passed in 12.46s`. No live 200,000-record ingestion was run.
 - Implementation commit: `9270797 feat(openalex): add scheduled bronze silver pipeline`.
 - RDD: disabled globally; no native review was started.
 - Next step: configure the desired query scope and run the first scheduled or manual ingestion from Docker.
