@@ -37,8 +37,8 @@ The README predates the current Scopus support and contains some operational sta
 - Route evidence: source/config mapping requires more than three files; one documentation writer is appropriate.
 - [x] Documentation authored and reviewed; one incorrect `docker-compose.yml` reference in the index was corrected to `compose.yaml` after parent spot-check.
 - [x] Verification evidence: independent reviewer found no material issues; parent read all four documents; local-link validation passed; `git diff --check` passed.
-- [ ] Work-unit commit identity recorded.
+- [x] Work-unit commit: `332bccd` (`docs: document OpenAlex and Scopus pipeline`), containing the documentation set and this task plan.
 
 ## Next step
 
-Create a work-unit commit containing only the task file and four new documentation files; preserve all unrelated worktree changes.
+Documentation task complete; unrelated worktree changes remain untouched.
