@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 import os
 import uuid
 from contextlib import contextmanager
@@ -13,6 +15,7 @@ from typing import Any, Iterator
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from pyspark.sql.types import (
     ArrayType,
     BooleanType,
@@ -36,6 +39,23 @@ class ProcessingSummary:
     skipped_batches: tuple[str, ...]
     valid_rows: int
     rejected_rows: int
+
+
+def output_partitions(rows: int, rows_per_file: int = 100_000) -> int:
+    """Size output by measured batch volume, keeping small increments in one file."""
+    if rows_per_file < 1:
+        raise ValueError("rows_per_file must be positive")
+    return max(1, math.ceil(rows / rows_per_file))
+
+
+def unique_publications(records: DataFrame) -> DataFrame:
+    """Analysis view: prefer OpenAlex for shared DOI; preserve every DOI-less source ID."""
+    key = F.when(
+        F.col("normalized_doi").isNotNull() & (F.trim("normalized_doi") != ""),
+        F.concat(F.lit("doi:"), F.col("normalized_doi")),
+    ).otherwise(F.concat_ws(":", F.lit("source"), F.col("source"), F.col("source_id")))
+    window = Window.partitionBy(key).orderBy(F.col("source").asc(), F.col("source_id").asc())
+    return records.withColumn("_rank", F.row_number().over(window)).where(F.col("_rank") == 1).drop("_rank")
 
 
 RAW_SCHEMA = StructType(
@@ -65,6 +85,12 @@ RAW_PAGE_SCHEMA = StructType(
         StructField("results", ArrayType(StringType(), containsNull=True), True),
     ]
 )
+
+SCOPUS_PAGE_SCHEMA = StructType([
+    StructField("search-results", StructType([
+        StructField("entry", ArrayType(StringType()), True),
+    ]), True),
+])
 
 TOPIC_SCHEMA = ArrayType(
     StructType(
@@ -103,14 +129,17 @@ def _load_batch_dataframe(
         if not page_path.is_file():
             raise ProcessingError(f"Unable to read Bronze page {page_path.name}")
 
+    source = metadata.get("source", "openalex")
+    page_schema = SCOPUS_PAGE_SCHEMA if source == "scopus" else RAW_PAGE_SCHEMA
     pages = (
         spark.read.option("wholetext", "true")
         .text([str(path) for path in page_paths])
         .withColumn("_page_path", F.input_file_name())
-        .withColumn("_page", F.from_json(F.col("value"), RAW_PAGE_SCHEMA))
+        .withColumn("_page", F.from_json(F.col("value"), page_schema))
     )
+    results = F.col("_page.`search-results`.entry") if source == "scopus" else F.col("_page.results")
     invalid_page = pages.filter(
-        F.col("_page").isNull() | F.col("_page.results").isNull()
+        F.col("_page").isNull() | results.isNull()
     ).select("_page_path").first()
     if invalid_page is not None:
         page_name = str(invalid_page["_page_path"]).rsplit("/", 1)[-1]
@@ -118,8 +147,30 @@ def _load_batch_dataframe(
 
     records = pages.select(
         "_page_path",
-        F.posexplode(F.col("_page.results")).alias("_record_index", "_record_json"),
+        F.posexplode(results).alias("_record_index", "_record_json"),
     )
+    if source == "scopus":
+        def field(name: str) -> F.Column:
+            return F.trim(F.get_json_object(F.col("_record_json"), f"$.{name}"))
+
+        date = field("prism:coverDate")
+        page_number = F.regexp_extract(F.col("_page_path"), r"page-(\d+)\.json$", 1).cast("int")
+        return records.select(
+            F.lit(batch_id).alias("batch_id"),
+            ((page_number - F.lit(1)) * F.lit(1000) + F.col("_record_index")).cast("int").alias("record_order"),
+            F.col("_record_json").alias("record_json"),
+            field("eid").alias("openalex_id"),
+            field("dc:title").alias("title"),
+            F.regexp_extract(date, r"^(\d{4})", 1).cast("int").alias("publication_year"),
+            date.alias("publication_date"),
+            F.array().cast("array<string>").alias("topic_ids"),
+            F.array().cast("array<string>").alias("topic_names"),
+            field("subtypeDescription").alias("work_type"),
+            field("prism:doi").alias("doi"),
+            field("citedby-count").cast("long").alias("cited_by_count"),
+            F.lit(None).cast("boolean").alias("is_oa"),
+            field("prism:publicationName").alias("source_name"),
+        )
     records = records.withColumn(
         "_topics",
         F.coalesce(
@@ -179,7 +230,7 @@ def _load_batch_dataframe(
     )
 
 
-def _validation_reason(dataframe: DataFrame) -> DataFrame:
+def _validation_reason(dataframe: DataFrame, source: str = "openalex") -> DataFrame:
     """Create auditable, composable reasons instead of dropping bad records."""
 
     reasons = F.array(
@@ -203,7 +254,7 @@ def _validation_reason(dataframe: DataFrame) -> DataFrame:
         F.when(
             (F.size(F.col("topic_ids")) + F.size(F.col("topic_names"))) == 0,
             F.lit("missing_topics"),
-        ),
+        ) if source == "openalex" else F.lit(None),
     )
     return dataframe.withColumn("rejection_reason", F.concat_ws("; ", reasons))
 
@@ -218,13 +269,15 @@ def _rejected_columns(dataframe: DataFrame) -> DataFrame:
     )
 
 
-def _silver_columns(dataframe: DataFrame, processed_at: str) -> DataFrame:
+def _silver_columns(dataframe: DataFrame, processed_at: str, source: str = "openalex") -> DataFrame:
     publication_year = F.when(
         F.col("publication_year").isNotNull(), F.col("publication_year")
     ).otherwise(F.regexp_extract(F.col("publication_date"), r"^(\d{4})", 1).cast("int"))
     return dataframe.select(
         "batch_id",
         "openalex_id",
+        F.lit(source).alias("source"),
+        F.col("openalex_id").alias("source_id"),
         "title",
         publication_year.alias("publication_year"),
         "publication_date",
@@ -233,6 +286,7 @@ def _silver_columns(dataframe: DataFrame, processed_at: str) -> DataFrame:
         (F.size(F.col("topic_ids")) + F.size(F.col("topic_names"))).alias("topic_count"),
         "work_type",
         "doi",
+        F.regexp_replace(F.lower(F.trim(F.col("doi"))), r"^(https?://(dx\.)?doi\.org/|doi:)", "").alias("normalized_doi"),
         "cited_by_count",
         "is_oa",
         "source_name",
@@ -277,7 +331,7 @@ def _completed_metadata(bronze_root: Path) -> list[dict[str, Any]]:
             raise ProcessingError(f"Unable to read batch metadata {path.name}") from exc
         if not isinstance(record, dict):
             raise ProcessingError(f"Batch metadata {path.name} is not an object")
-        if record.get("status") == "completed":
+        if record.get("status") in {"completed", "completed_target", "completed_exhausted"} and record.get("page_count", 0) > 0:
             records.append(record)
     return sorted(records, key=lambda record: (record.get("created_at", ""), record["batch_id"]))
 
@@ -290,8 +344,9 @@ def _process_one_batch(
     previous_silver_paths: tuple[Path, ...] = (),
 ) -> tuple[int, int]:
     batch_id = str(metadata["batch_id"])
+    source = metadata.get("source", "openalex")
     base = _load_batch_dataframe(spark, bronze_root, metadata)
-    validated = _validation_reason(base)
+    validated = _validation_reason(base, source)
     invalid = validated.filter(F.col("rejection_reason") != "")
     valid = validated.filter(F.col("rejection_reason") == "")
 
@@ -314,18 +369,25 @@ def _process_one_batch(
     cross_batch_duplicates: DataFrame | None = None
     if previous_silver_paths:
         # Silver contains only validated rows, and completed paths exclude the current batch.
-        previous_ids = (
-            spark.read.parquet(*(str(path) for path in previous_silver_paths))
-            .select("openalex_id")
-            .where(F.col("openalex_id").isNotNull())
-            .distinct()
-        )
-        cross_batch_duplicates = accepted.join(
-            previous_ids, on="openalex_id", how="left_semi"
-        ).withColumn(
-            "rejection_reason", F.lit("duplicate_openalex_id_previous_batch")
-        )
-        accepted = accepted.join(previous_ids, on="openalex_id", how="left_anti")
+        same_source_ids = []
+        for path in previous_silver_paths:
+            previous = spark.read.parquet(str(path))
+            if "source" in previous.columns:
+                previous = previous.where(F.col("source") == source)
+            elif source != "openalex":
+                continue
+            same_source_ids.append(previous.select("openalex_id"))
+        if same_source_ids:
+            previous_ids = same_source_ids[0]
+            for other in same_source_ids[1:]:
+                previous_ids = previous_ids.unionByName(other)
+            previous_ids = previous_ids.where(F.col("openalex_id").isNotNull()).distinct()
+            cross_batch_duplicates = accepted.join(
+                previous_ids, on="openalex_id", how="left_semi"
+            ).withColumn(
+                "rejection_reason", F.lit("duplicate_openalex_id_previous_batch")
+            )
+            accepted = accepted.join(previous_ids, on="openalex_id", how="left_anti")
 
     rejected = _rejected_columns(invalid).unionByName(_rejected_columns(duplicates))
     if cross_batch_duplicates is not None:
@@ -335,7 +397,7 @@ def _process_one_batch(
     silver_path = silver_root / "works" / batch_id
     rejected_path = bronze_root / "rejected" / batch_id
     (
-        _silver_columns(accepted, processed_at)
+        _silver_columns(accepted, processed_at, source).repartition(output_partitions(int(metadata.get("record_count", 0))))
         .write.mode("overwrite")
         .option("compression", "snappy")
         .parquet(str(silver_path))
@@ -390,12 +452,15 @@ def process_pending_batches(
                 },
             )
             try:
+                started = time.monotonic()
+                from src.compaction import resolve_completed_paths
+
                 batch_valid, batch_rejected = _process_one_batch(
                     active_spark,
                     bronze_path,
                     silver_path,
                     metadata,
-                    tuple(completed_silver_paths),
+                    tuple(resolve_completed_paths(silver_path, completed_silver_paths)),
                 )
             except Exception as exc:
                 _write_json_atomic(
@@ -415,6 +480,7 @@ def process_pending_batches(
                     "status": "completed",
                     "valid_rows": batch_valid,
                     "rejected_rows": batch_rejected,
+                    "write_seconds": round(time.monotonic() - started, 3),
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 },
             )

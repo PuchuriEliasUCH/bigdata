@@ -91,6 +91,7 @@ def test_processing_validates_normalizes_deduplicates_and_rejects(spark, tmp_pat
     assert summary.processed_batches == ("initial-test",)
     assert summary.valid_rows == 1
     assert summary.rejected_rows == 3
+    assert len(list((silver_root / "works" / "initial-test").glob("part-*.parquet"))) == 1
 
     valid_rows = spark.read.parquet(str(silver_root / "works" / "initial-test")).collect()
     assert len(valid_rows) == 1
@@ -221,3 +222,80 @@ def test_previous_batch_duplicate_is_rejected_without_using_invalid_ids(spark, t
     assert len(second_rejected) == 1
     assert second_rejected[0]["openalex_id"] == "https://openalex.org/W20"
     assert second_rejected[0]["rejection_reason"] == "duplicate_openalex_id_previous_batch"
+
+
+def test_scopus_and_openalex_keep_provenance_and_share_normalized_doi(spark, tmp_path):
+    bronze = tmp_path / "bronze"
+    silver = tmp_path / "silver"
+    write_completed_batch(bronze, "batch-001", [{
+        "id": "https://openalex.org/W1", "title": "Same article", "publication_year": 2024,
+        "topics": [{"display_name": "Data"}], "doi": "https://doi.org/10.1234/ABC",
+    }])
+    batch = "batch-002"
+    raw = bronze / "scopus" / batch
+    raw.mkdir(parents=True)
+    (raw / "page-000001.json").write_text(json.dumps({"search-results": {"entry": [{
+        "eid": "2-s2.0-123", "dc:title": "Same article", "prism:coverDate": "2024-01-01",
+        "prism:doi": "10.1234/abc", "subtypeDescription": "Article",
+    }]}}))
+    (bronze / "batch_metadata" / f"{batch}.json").write_text(json.dumps({
+        "batch_id": batch, "source": "scopus", "status": "completed_target", "page_count": 1,
+        "raw_page_dir": f"scopus/{batch}", "created_at": "z",
+    }))
+    summary = process_pending_batches(spark, bronze, silver)
+    assert summary.valid_rows == 2
+    openalex = spark.read.parquet(str(silver / "works" / "batch-001")).first()
+    scopus = spark.read.parquet(str(silver / "works" / batch)).first()
+    assert (openalex["source"], openalex["source_id"]) == ("openalex", "https://openalex.org/W1")
+    assert (scopus["source"], scopus["source_id"]) == ("scopus", "2-s2.0-123")
+    assert openalex["normalized_doi"] == scopus["normalized_doi"] == "10.1234/abc"
+
+
+def test_large_batch_uses_more_than_one_output_partition():
+    assert spark_pipeline.output_partitions(100_001, rows_per_file=100_000) == 2
+    assert spark_pipeline.output_partitions(1000, rows_per_file=100_000) == 1
+
+
+def test_scopus_processing_can_follow_legacy_openalex_without_source_column(spark, tmp_path):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    from pyspark.sql.types import StructType, StructField, StringType
+    old = silver / "works" / "old"
+    spark.createDataFrame([("legacy-id",)], StructType([StructField("openalex_id", StringType())])).write.parquet(str(old))
+    state = silver / "_processing"
+    state.mkdir(parents=True)
+    (state / "old.json").write_text('{"status":"completed"}')
+    write_completed_batch(bronze, "old", [{"id": "legacy-id", "title": "old", "publication_year": 2020, "topics": [{"id": "T"}]}])
+    batch = "new"
+    raw = bronze / "scopus" / batch
+    raw.mkdir(parents=True)
+    (raw / "page-000001.json").write_text(json.dumps({"search-results": {"entry": [{"eid": "new-id", "dc:title": "new", "prism:coverDate": "2024-01-01"}]}}))
+    (bronze / "batch_metadata" / "new.json").write_text(json.dumps({"batch_id": batch, "source": "scopus", "status": "completed_target", "page_count": 1, "raw_page_dir": "scopus/new", "created_at": "z"}))
+    assert process_pending_batches(spark, bronze, silver).valid_rows == 1
+
+
+def test_unique_publications_preserves_source_rows_and_missing_doi(spark):
+    from src.spark_pipeline import unique_publications
+    rows = [
+        ("openalex", "W1", "10.1/a"),
+        ("scopus", "S1", "10.1/a"),
+        ("scopus", "S2", None),
+        ("openalex", "W2", None),
+    ]
+    frame = spark.createDataFrame(rows, ["source", "source_id", "normalized_doi"])
+    unique = unique_publications(frame).collect()
+    assert len(unique) == 3
+    assert {row.source_id for row in unique if row.normalized_doi == "10.1/a"} == {"W1"}
+
+
+def test_scopus_duplicate_across_pages_is_rejected(spark, tmp_path):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    batch = "scopus-batch"
+    raw = bronze / "scopus" / batch
+    raw.mkdir(parents=True)
+    metadata = bronze / "batch_metadata"
+    metadata.mkdir()
+    for page_number in (1, 2):
+        (raw / f"page-{page_number:06d}.json").write_text(json.dumps({"search-results": {"entry": [{"eid": "duplicate", "dc:title": "Title", "prism:coverDate": "2024-01-01"}]}}))
+    (metadata / f"{batch}.json").write_text(json.dumps({"batch_id": batch, "source": "scopus", "status": "completed_target", "page_count": 2, "raw_page_dir": f"scopus/{batch}"}))
+    summary = process_pending_batches(spark, bronze, silver)
+    assert (summary.valid_rows, summary.rejected_rows) == (1, 1)

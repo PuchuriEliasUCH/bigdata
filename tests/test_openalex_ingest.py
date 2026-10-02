@@ -29,6 +29,8 @@ class CursorSession:
         self.calls = []
 
     def get(self, url, *, params, timeout):
+        if url.endswith("/rate-limit"):
+            return FakeResponse({"rate_limit": {"credits_remaining": 100000, "resets_at": "tomorrow"}})
         self.calls.append({"url": url, "params": dict(params), "timeout": timeout})
         page = self.pages[params["cursor"]]
         if isinstance(page, Exception):
@@ -80,7 +82,7 @@ def test_initial_ingestion_paginates_and_persists_raw_pages_and_metadata(tmp_pat
     assert all(call["params"]["per-page"] <= 200 for call in session.calls)
 
     metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
-    assert metadata["status"] == "completed"
+    assert metadata["status"] == "completed_target"
     assert metadata["record_count"] == 450
     assert len(list((tmp_path / "bronze" / "openalex" / summary.batch_id).glob("page-*.json"))) == 3
     assert "unit-test-token" not in summary.metadata_path.read_text(encoding="utf-8")
@@ -99,7 +101,7 @@ def test_restart_resumes_running_initial_batch_instead_of_starting_incremental(
     with pytest.raises(Exception):
         run_ingestion(
             tmp_path / "bronze",
-            client=OpenAlexClient("unit-test-token", session=interrupted_session),
+            client=OpenAlexClient("unit-test-token", session=interrupted_session, max_retries=0),
             initial_target_records=450,
             page_size=200,
         )
@@ -107,7 +109,7 @@ def test_restart_resumes_running_initial_batch_instead_of_starting_incremental(
     metadata_files = list((tmp_path / "bronze" / "batch_metadata").glob("*.json"))
     assert len(metadata_files) == 1
     running_metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
-    assert running_metadata["status"] == "running"
+    assert running_metadata["status"] == "transient_error"
     assert running_metadata["mode"] == "initial"
     assert running_metadata["record_count"] == 200
 
@@ -189,3 +191,184 @@ def test_request_errors_never_echo_the_api_token():
         )
 
     assert "unit-test-token" not in str(error.value)
+
+
+def test_exhaustion_before_target_is_success_and_does_not_refetch(tmp_path):
+    bronze = tmp_path / "bronze"
+    client = OpenAlexClient("secret", session=CursorSession({"*": page(0, 2, "next"), "next": page(2, 0, None)}))
+    first = run_ingestion(bronze, client=client, initial_target_records=10)
+    assert first.status == "completed_exhausted"
+    assert first.records == 2
+    assert run_ingestion(bronze, client=client, initial_target_records=10).status == "completed_exhausted"
+    assert len(list((bronze / "batch_metadata").glob("*.json"))) == 1
+
+
+def test_default_initial_target_is_source_allocation_and_incremental_limit_unchanged():
+    from src.openalex_ingest import DEFAULT_INCREMENTAL_LIMIT, DEFAULT_INITIAL_TARGET
+
+    assert DEFAULT_INITIAL_TARGET == 100_000
+    assert DEFAULT_INCREMENTAL_LIMIT == 1_000
+
+
+def test_empty_terminal_page_is_exhaustion(tmp_path):
+    client = OpenAlexClient("secret", session=CursorSession({"*": page(0, 0, None)}))
+    summary = run_ingestion(tmp_path, client=client, initial_target_records=5)
+    assert summary.status == "completed_exhausted"
+    assert summary.records == 0
+
+
+def test_transient_failure_keeps_confirmed_cursor_and_resumes(tmp_path):
+    bronze = tmp_path / "bronze"
+    client = OpenAlexClient("secret", max_retries=0, session=CursorSession({
+        "*": page(0, 2, "next"), "next": requests.ConnectionError("secret")
+    }))
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(bronze, client=client, initial_target_records=4)
+    state_file = next((bronze / "batch_metadata").glob("*.json"))
+    state = json.loads(state_file.read_text())
+    assert state["status"] == "transient_error"
+    assert state["next_cursor"] == "next"
+    assert state["record_count"] == 2
+    assert "secret" not in state_file.read_text()
+    resumed = CursorSession({"next": page(2, 2, "later")})
+    summary = run_ingestion(bronze, client=OpenAlexClient("secret", session=resumed), initial_target_records=4)
+    assert summary.status == "completed_target"
+    assert [call["params"]["cursor"] for call in resumed.calls] == ["next"]
+
+
+def test_page_written_but_checkpoint_failed_is_replayed_without_duplicates(tmp_path, monkeypatch):
+    from src.openalex_ingest import BatchStateStore
+
+    original = BatchStateStore.write_metadata
+    def fail_once(self, metadata):
+        if metadata["record_count"] == 2 and not getattr(self, "failed_once", False):
+            self.failed_once = True
+            raise OSError("simulated crash")
+        return original(self, metadata)
+
+    monkeypatch.setattr(BatchStateStore, "write_metadata", fail_once)
+    bronze = tmp_path / "bronze"
+    with pytest.raises(OSError):
+        run_ingestion(bronze, client=OpenAlexClient("secret", session=CursorSession({"*": page(0, 2, "next")})), initial_target_records=2)
+    monkeypatch.setattr(BatchStateStore, "write_metadata", original)
+    summary = run_ingestion(bronze, client=OpenAlexClient("secret", session=CursorSession({"*": page(0, 2, "next")})), initial_target_records=2)
+    assert summary.records == 2
+    assert len(list((bronze / "openalex" / summary.batch_id).glob("page-*.json"))) == 1
+
+
+def test_nonempty_page_without_next_cursor_is_not_proven_exhausted(tmp_path):
+    client = OpenAlexClient("secret", session=CursorSession({"*": page(0, 2, None)}))
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(tmp_path, client=client, initial_target_records=10)
+    state = json.loads(next((tmp_path / "batch_metadata").glob("*.json")).read_text())
+    assert state["status"] == "failed"
+
+
+def test_rate_limit_prevents_request_without_storing_key(tmp_path):
+    class RateSession(CursorSession):
+        def get(self, url, *, params, timeout):
+            if url.endswith("/rate-limit"):
+                return FakeResponse({"api_key": "secret", "rate_limit": {"credits_remaining": 0, "resets_at": "tomorrow"}})
+            return super().get(url, params=params, timeout=timeout)
+
+    session = RateSession({"*": page(0, 1, "next")})
+    client = OpenAlexClient("secret", session=session)
+    summary = run_ingestion(tmp_path, client=client, initial_target_records=3)
+    assert summary.status == "quota_exceeded"
+    assert session.calls == []
+    state = json.loads(summary.metadata_path.read_text())
+    assert state["next_attempt_at"] == "tomorrow"
+    assert "secret" not in summary.metadata_path.read_text()
+
+
+@pytest.mark.parametrize("code, expected", [(429, "rate_limited"), (503, "transient_error"), (401, "failed")])
+def test_http_failure_state_is_not_completed(tmp_path, code, expected):
+    class ErrorSession(CursorSession):
+        def get(self, url, *, params, timeout):
+            if url.endswith("/rate-limit"):
+                return super().get(url, params=params, timeout=timeout)
+            response = requests.Response()
+            response.status_code = code
+            response.url = "https://api.openalex.org/works?api_key=secret"
+            raise requests.HTTPError("secret", response=response)
+
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(tmp_path, client=OpenAlexClient("secret", session=ErrorSession({}), max_retries=0), initial_target_records=3)
+    state_path = next((tmp_path / "batch_metadata").glob("*.json"))
+    state = json.loads(state_path.read_text())
+    assert state["status"] == expected
+    assert state["http_status"] == code
+    assert "secret" not in state_path.read_text()
+
+
+def test_missing_pagination_metadata_is_not_exhaustion(tmp_path):
+    client = OpenAlexClient("secret", session=CursorSession({"*": {"results": []}}))
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(tmp_path, client=client, initial_target_records=3)
+    state = json.loads(next((tmp_path / "batch_metadata").glob("*.json")).read_text())
+    assert state["status"] == "failed"
+
+
+def test_openalex_ignores_paused_scopus_batches(tmp_path):
+    metadata_dir = tmp_path / "batch_metadata"
+    metadata_dir.mkdir()
+    (metadata_dir / "scopus.json").write_text(json.dumps({
+        "batch_id": "scopus", "source": "scopus", "status": "completed_target",
+        "mode": "initial", "target_records": 100, "created_at": "z",
+    }))
+    summary = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=CursorSession({"*": page(0, 1, "next")})), initial_target_records=1)
+    assert summary.status == "completed_target"
+    assert summary.batch_id != "scopus"
+
+
+def test_openalex_retries_transient_request_without_advancing_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.openalex_ingest.time.sleep", lambda seconds: None)
+    class FlakySession(CursorSession):
+        def __init__(self):
+            super().__init__({"*": page(0, 1, "next")})
+            self.failures = 0
+
+        def get(self, url, *, params, timeout):
+            if url.endswith("/works") and self.failures < 2:
+                self.failures += 1
+                raise requests.Timeout("secret")
+            return super().get(url, params=params, timeout=timeout)
+
+    session = FlakySession()
+    client = OpenAlexClient("secret", session=session, max_retries=2)
+    summary = run_ingestion(tmp_path, client=client, initial_target_records=1)
+    assert summary.status == "completed_target"
+    assert session.failures == 2
+
+
+def test_invalid_cursor_marks_batch_failed(tmp_path):
+    client = OpenAlexClient("secret", session=CursorSession({"*": {"meta": {"next_cursor": 123}, "results": [{"id": "W1"}]}}))
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(tmp_path, client=client, initial_target_records=2)
+    metadata = json.loads(next((tmp_path / "batch_metadata").glob("*.json")).read_text())
+    assert metadata["status"] == "failed"
+
+
+def test_openalex_rate_limit_retries_after_header(tmp_path, monkeypatch):
+    waits = []
+    monkeypatch.setattr("src.openalex_ingest.time.sleep", waits.append)
+    class RateOnce(CursorSession):
+        def __init__(self):
+            super().__init__({"*": page(0, 1, "next")})
+            self.calls_to_works = 0
+
+        def get(self, url, *, params, timeout):
+            if url.endswith("/works"):
+                self.calls_to_works += 1
+                if self.calls_to_works == 1:
+                    response = requests.Response()
+                    response.status_code = 429
+                    response.headers["Retry-After"] = "2"
+                    raise requests.HTTPError("private", response=response)
+            return super().get(url, params=params, timeout=timeout)
+
+    session = RateOnce()
+    summary = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session, max_retries=1), initial_target_records=1)
+    assert summary.status == "completed_target"
+    assert session.calls_to_works == 2
+    assert waits == [2]

@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import requests
+import time
 
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
-DEFAULT_INITIAL_TARGET = 200_000
+DEFAULT_INITIAL_TARGET = 100_000
 DEFAULT_INCREMENTAL_LIMIT = 1_000
 DEFAULT_PAGE_SIZE = 200
 
@@ -30,6 +31,12 @@ class TokenConfigurationError(IngestionError):
 
 class OpenAlexRequestError(IngestionError):
     """Raised without copying request URLs that could contain credentials."""
+
+    def __init__(self, message: str, status: str = "transient_error", http_status: int | None = None, retry_after: str | None = None):
+        super().__init__(message)
+        self.status = status
+        self.http_status = http_status
+        self.retry_after = retry_after
 
 
 class BatchStateError(IngestionError):
@@ -64,6 +71,7 @@ class OpenAlexClient:
         session: Any | None = None,
         base_url: str = OPENALEX_WORKS_URL,
         timeout_seconds: int = 60,
+        max_retries: int = 2,
     ) -> None:
         if not token or not token.strip():
             raise TokenConfigurationError("OPENALEX_TOKEN must be set")
@@ -71,6 +79,7 @@ class OpenAlexClient:
         self._session = session or requests.Session()
         self._base_url = base_url
         self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
 
     @classmethod
     def from_environment(cls) -> "OpenAlexClient":
@@ -93,33 +102,60 @@ class OpenAlexClient:
             "cursor": cursor,
             "per-page": per_page,
         }
-        try:
-            response = self._session.get(
-                self._base_url,
-                params=params,
-                timeout=self._timeout_seconds,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            suffix = f" (HTTP {status_code})" if status_code else ""
-            raise OpenAlexRequestError(f"OpenAlex request failed{suffix}") from None
-        except (TypeError, ValueError) as exc:
-            raise OpenAlexRequestError("OpenAlex returned invalid JSON") from exc
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._session.get(
+                    self._base_url,
+                    params=params,
+                    timeout=self._timeout_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except requests.RequestException as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                status = "rate_limited" if status_code == 429 else (
+                    "failed" if status_code is not None and status_code < 500 else "transient_error"
+                )
+                retry_after = getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After")
+                if status in {"transient_error", "rate_limited"} and attempt < self._max_retries:
+                    try:
+                        delay = float(retry_after) if retry_after is not None else attempt + 1
+                    except ValueError:
+                        delay = attempt + 1
+                    time.sleep(min(max(delay, 0), 60))
+                    continue
+                suffix = f" (HTTP {status_code})" if status_code else ""
+                raise OpenAlexRequestError(f"OpenAlex request failed{suffix}", status, status_code, retry_after) from None
+            except (TypeError, ValueError):
+                raise OpenAlexRequestError("OpenAlex returned invalid JSON", "failed") from None
 
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-            raise OpenAlexRequestError("OpenAlex response did not contain a results list")
+            raise OpenAlexRequestError("OpenAlex response did not contain a results list", "failed")
+        if not isinstance(payload.get("meta"), dict) or "next_cursor" not in payload["meta"]:
+            raise OpenAlexRequestError("OpenAlex response did not contain a next cursor", "failed")
         return payload
+
+    def rate_limit(self) -> dict[str, Any]:
+        try:
+            response = self._session.get(
+                "https://api.openalex.org/rate-limit",
+                params={"api_key": self._token}, timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+            limit = response.json()["rate_limit"]
+            return {"credits_remaining": int(limit["credits_remaining"]), "resets_at": limit["resets_at"]}
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            raise OpenAlexRequestError("OpenAlex rate-limit check failed") from None
 
 
 class BatchStateStore:
     """Own the Bronze layout and atomically update per-batch state."""
 
-    def __init__(self, bronze_root: Path) -> None:
+    def __init__(self, bronze_root: Path, source: str = "openalex") -> None:
         self.root = Path(bronze_root)
         self.metadata_dir = self.root / "batch_metadata"
-        self.raw_dir = self.root / "openalex"
+        self.raw_dir = self.root / source
         self.lock_path = self.root / ".pipeline.lock"
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +222,7 @@ def _new_batch_metadata(
     created_at = utc_now()
     return {
         "batch_id": batch_id,
+        "source": "openalex",
         "mode": mode,
         "status": "running",
         "target_records": target_records,
@@ -205,21 +242,10 @@ def _batch_id(mode: str) -> str:
 
 
 def _latest_completed(metadata: list[dict[str, Any]]) -> dict[str, Any] | None:
-    completed = [record for record in metadata if record.get("status") == "completed"]
+    completed = [record for record in metadata if record.get("status") in {"completed", "completed_target", "completed_exhausted"}]
     if not completed:
         return None
     return max(completed, key=lambda record: record.get("created_at", ""))
-
-
-def _mark_failed_initial(
-    store: BatchStateStore,
-    metadata: dict[str, Any],
-    message: str,
-) -> None:
-    metadata["status"] = "failed"
-    metadata["error"] = message
-    metadata["updated_at"] = utc_now()
-    store.write_metadata(metadata)
 
 
 def _run_ingestion(
@@ -237,8 +263,11 @@ def _run_ingestion(
     if page_size < 1 or page_size > DEFAULT_PAGE_SIZE:
         raise IngestionError("Page size must be between 1 and 200")
 
-    metadata_records = store.list_metadata()
-    running = [record for record in metadata_records if record.get("status") == "running"]
+    metadata_records = [
+        record for record in store.list_metadata()
+        if record.get("source", "openalex") == "openalex"
+    ]
+    running = [record for record in metadata_records if record.get("status") in {"running", "transient_error", "rate_limited"}]
     if len(running) > 1:
         raise BatchStateError("Multiple running batches cannot be resumed safely")
 
@@ -250,9 +279,12 @@ def _run_ingestion(
             raise BatchStateError("Running batch metadata is incomplete")
     else:
         initial_complete = any(
-            record.get("mode") == "initial" and record.get("status") == "completed"
+            record.get("mode") == "initial" and record.get("status") in {"completed", "completed_target", "completed_exhausted"}
             for record in metadata_records
         )
+        exhausted = _latest_completed(metadata_records)
+        if exhausted and exhausted.get("status") == "completed_exhausted":
+            return IngestionSummary(exhausted["batch_id"], exhausted["mode"], "completed_exhausted", exhausted["page_count"], exhausted["record_count"], exhausted["_metadata_path"])
         mode = "incremental" if initial_complete else "initial"
         target_records = incremental_limit if mode == "incremental" else initial_target_records
         previous = _latest_completed(metadata_records) if mode == "incremental" else None
@@ -272,8 +304,8 @@ def _run_ingestion(
 
     # A completed initial batch is the only switch that permits incremental
     # mode. A running initial batch always resumes with its original cursor.
-    if mode == "incremental" and cursor is None:
-        metadata["status"] = "completed"
+    if cursor is None:
+        metadata["status"] = "completed_exhausted"
         metadata["completed_at"] = utc_now()
         metadata["updated_at"] = utc_now()
         metadata["note"] = "No cursor remained after the previous completed batch"
@@ -281,7 +313,7 @@ def _run_ingestion(
         return IngestionSummary(
             batch_id=metadata["batch_id"],
             mode=mode,
-            status="completed",
+            status="completed_exhausted",
             pages=page_count,
             records=record_count,
             metadata_path=metadata_path,
@@ -289,35 +321,55 @@ def _run_ingestion(
 
     while record_count < target_records:
         if not cursor:
-            message = "OpenAlex ended cursor pagination before the target was reached"
-            if mode == "initial":
-                _mark_failed_initial(store, metadata, message)
-            raise IngestionError(message)
+            break
 
         remaining = target_records - record_count
         request_size = min(page_size, remaining, DEFAULT_PAGE_SIZE)
-        payload = client.fetch_page(cursor=cursor, per_page=request_size)
+        try:
+            if metadata.get("check_rate_limit", True):
+                limit = client.rate_limit()
+                metadata["credits_remaining"] = limit["credits_remaining"]
+                if limit["credits_remaining"] < 10:
+                    metadata.update(status="quota_exceeded", stop_reason="insufficient_credits", next_attempt_at=limit["resets_at"], updated_at=utc_now())
+                    path = store.write_metadata(metadata)
+                    return IngestionSummary(metadata["batch_id"], mode, "quota_exceeded", page_count, record_count, path)
+            payload = client.fetch_page(cursor=cursor, per_page=request_size)
+        except OpenAlexRequestError as exc:
+            metadata.update(status=exc.status, http_status=exc.http_status, stop_reason=str(exc), updated_at=utc_now())
+            if exc.retry_after:
+                metadata["next_attempt_at"] = exc.retry_after
+            store.write_metadata(metadata)
+            raise
         results = payload["results"]
         if len(results) > remaining:
             # The API should honor per-page. Refusing an oversized response is
             # safer than silently violating the incremental 1,000-record cap.
-            raise IngestionError("OpenAlex returned more records than requested")
-        if not results:
-            message = "OpenAlex returned no records before the target was reached"
-            if mode == "initial":
-                _mark_failed_initial(store, metadata, message)
-            raise IngestionError(message)
-
+            metadata.update(status="failed", stop_reason="oversized_page", updated_at=utc_now())
+            store.write_metadata(metadata)
+            raise OpenAlexRequestError("OpenAlex returned more records than requested", "failed")
         next_cursor = (payload.get("meta") or {}).get("next_cursor")
         if next_cursor is not None and not isinstance(next_cursor, str):
-            raise IngestionError("OpenAlex returned an invalid next cursor")
+            metadata.update(status="failed", stop_reason="invalid_next_cursor", updated_at=utc_now())
+            store.write_metadata(metadata)
+            raise OpenAlexRequestError("OpenAlex returned an invalid next cursor", "failed")
         if next_cursor == cursor and record_count + len(results) < target_records:
-            raise IngestionError("OpenAlex cursor did not advance")
+            metadata.update(status="failed", stop_reason="stalled_cursor", updated_at=utc_now())
+            store.write_metadata(metadata)
+            raise OpenAlexRequestError("OpenAlex cursor did not advance", "failed")
+        if not results and next_cursor is not None:
+            metadata.update(status="failed", stop_reason="empty_nonterminal_page", updated_at=utc_now())
+            store.write_metadata(metadata)
+            raise OpenAlexRequestError("OpenAlex returned an empty non-terminal page", "failed")
+        if results and next_cursor is None and record_count + len(results) < target_records:
+            metadata.update(status="failed", stop_reason="missing_next_cursor", updated_at=utc_now())
+            store.write_metadata(metadata)
+            raise OpenAlexRequestError("OpenAlex returned a non-terminal page without a cursor", "failed")
 
-        page_count += 1
-        page_path = store.write_raw_page(metadata["batch_id"], page_count, payload)
-        page_files.append(str(page_path.relative_to(store.root)))
-        record_count += len(results)
+        if results:
+            page_count += 1
+            page_path = store.write_raw_page(metadata["batch_id"], page_count, payload)
+            page_files.append(str(page_path.relative_to(store.root)))
+            record_count += len(results)
         metadata.update(
             {
                 "record_count": record_count,
@@ -330,15 +382,18 @@ def _run_ingestion(
         )
         store.write_metadata(metadata)
         cursor = next_cursor
+        if cursor is None:
+            break
 
-    metadata["status"] = "completed"
+    metadata["status"] = "completed_target" if record_count >= target_records else "completed_exhausted"
+    metadata["stop_reason"] = metadata["status"]
     metadata["completed_at"] = utc_now()
     metadata["updated_at"] = utc_now()
     metadata_path = store.write_metadata(metadata)
     return IngestionSummary(
         batch_id=metadata["batch_id"],
         mode=mode,
-        status="completed",
+        status=metadata["status"],
         pages=page_count,
         records=record_count,
         metadata_path=metadata_path,

@@ -8,14 +8,28 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
-from src.openalex_ingest import run_ingestion
+from src.openalex_ingest import OpenAlexRequestError, run_ingestion
+from src.scopus_ingest import run_scopus_ingestion, run_scopus_years
 from src.spark_pipeline import process_pending_batches
 
 
 def main() -> None:
     bronze_root = Path(os.environ.get("BRONZE_PATH", "/data/bronze"))
     silver_root = Path(os.environ.get("SILVER_PATH", "/data/silver"))
-    ingestion = run_ingestion(bronze_root)
+    try:
+        ingestion = run_ingestion(bronze_root)
+        openalex_status = ingestion.status
+    except OpenAlexRequestError as exc:
+        ingestion = None
+        openalex_status = exc.status
+    scopus_query = os.environ.get("SCOPUS_QUERY", "").strip()
+    first_year = os.environ.get("SCOPUS_FIRST_YEAR")
+    last_year = os.environ.get("SCOPUS_LAST_YEAR")
+    if scopus_query and first_year and last_year:
+        partitions = run_scopus_years(bronze_root, query=scopus_query, first_year=int(first_year), last_year=int(last_year))
+        scopus = partitions[-1] if partitions else None
+    else:
+        scopus = run_scopus_ingestion(bronze_root, query=scopus_query) if scopus_query else None
 
     # A local master keeps the single-container exercise self-contained. The
     # same processing function can receive a cluster SparkSession in deployment.
@@ -35,11 +49,14 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "event": "pipeline_complete",
-                "batch_id": ingestion.batch_id,
-                "batch_mode": ingestion.mode,
-                "ingested_records": ingestion.records,
-                "ingested_pages": ingestion.pages,
+                "event": "pipeline_complete" if openalex_status in {"completed", "completed_target", "completed_exhausted"} and (scopus is None or scopus.status in {"completed_target", "completed_exhausted"}) else "pipeline_partial",
+                "batch_id": ingestion.batch_id if ingestion else None,
+                "batch_mode": ingestion.mode if ingestion else None,
+                "ingested_records": ingestion.records if ingestion else 0,
+                "ingested_pages": ingestion.pages if ingestion else 0,
+                "openalex_status": openalex_status,
+                "scopus_batch_id": scopus.batch_id if scopus else None,
+                "scopus_status": scopus.status if scopus else None,
                 "processed_batches": processing.processed_batches,
                 "skipped_batches": processing.skipped_batches,
                 "valid_rows": processing.valid_rows,
