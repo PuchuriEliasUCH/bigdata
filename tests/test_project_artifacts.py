@@ -12,7 +12,7 @@ def test_compose_has_one_scheduled_pipeline_service_and_env_file():
     assert "spark-pipeline:" in compose
     assert "env_file:" in compose
     assert "- .env" in compose
-    assert "* * * * *" in (ROOT / "scheduler" / "pipeline.cron").read_text(
+    assert "*/2 * * * *" in (ROOT / "scheduler" / "pipeline.cron").read_text(
         encoding="utf-8"
     )
 

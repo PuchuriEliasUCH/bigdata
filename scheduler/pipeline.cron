@@ -1,2 +1,2 @@
-# Run the ingestion pipeline once per minute.
-* * * * * cd /app && /usr/local/bin/python -m src.run_pipeline
+# Run the ingestion pipeline every two minutes: about 80 s of ingestion plus Spark and compaction.
+*/2 * * * * cd /app && /usr/local/bin/python -m src.run_pipeline

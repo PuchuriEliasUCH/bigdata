@@ -432,3 +432,29 @@ def test_scopus_years_stop_the_whole_run_when_the_time_budget_is_spent(tmp_path,
     assert _count_by_year(tmp_path)[1] == 0
     run_scopus_years(tmp_path, **options)
     assert _count_by_year(tmp_path) == (3, 2)
+
+
+
+def _paced_run(tmp_path, monkeypatch, clock, latency, rps):
+    sleeps = []
+    monkeypatch.setattr("src.scopus_ingest.time.sleep", sleeps.append)
+
+    class Slow(CorpusSession):
+        def get(self, url, *, params, headers, timeout):
+            clock.now += latency
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+
+    session = Slow([(f"e{i}", 2020, 20200101 + i) for i in range(6)])
+    run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), query="PUBYEAR = 2020",
+                         target_records=6, page_size=2, requests_per_second=rps)
+    return sleeps
+
+
+def test_request_spacing_counts_from_the_start_of_the_previous_request(tmp_path, monkeypatch, clock):
+    # A 1 s response already exceeds the 0.5 s minimum spacing, so no extra wait is needed.
+    assert _paced_run(tmp_path, monkeypatch, clock, latency=1.0, rps=2) == []
+
+
+def test_request_spacing_only_waits_for_the_remaining_interval(tmp_path, monkeypatch, clock):
+    sleeps = _paced_run(tmp_path, monkeypatch, clock, latency=0.1, rps=2)
+    assert len(sleeps) == 2 and all(abs(value - 0.4) < 1e-6 for value in sleeps)

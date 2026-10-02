@@ -150,6 +150,9 @@ def run_scopus_ingestion(
             try:
                 while True:
                     try:
+                        # Spacing counts from when this request starts, so a slow response
+                        # already pays for the interval and no extra wait is added after it.
+                        last_request = time.monotonic()
                         response = api.fetch_page(query, offset, count)
                     except (requests.Timeout, requests.ConnectionError):
                         if retries < max_retries:
@@ -157,7 +160,6 @@ def run_scopus_ingestion(
                             time.sleep(retries)
                             continue
                         raise
-                    last_request = time.monotonic()
                     code = response.status_code
                     headers = response.headers
                     if code == 429 and headers.get("X-ELS-Status") != "QUOTA_EXCEEDED" and retries < max_retries:

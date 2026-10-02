@@ -12,7 +12,8 @@ from src.openalex_ingest import OpenAlexRequestError
 def isolated_environment(tmp_path, monkeypatch):
     """Keep container .env values from reaching real APIs and point every zone at tmp_path."""
     for name in ("SCOPUS_QUERY", "SCOPUS_API", "INGEST_FIRST_YEAR", "INGEST_LAST_YEAR",
-                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES", "INGEST_TIME_BUDGET_SECONDS"):
+                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES", "INGEST_TIME_BUDGET_SECONDS",
+                 "INGEST_SCOPUS_SHARE", "SCOPUS_REQUESTS_PER_SECOND"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
@@ -51,9 +52,10 @@ def test_scheduler_runs_both_sources_with_the_default_2011_to_current_year_range
     monkeypatch.setattr(pipeline, "ingest_scopus", lambda root, **kw: seen.setdefault("scopus", kw) and [scopus_summary("quota_exceeded")])
     pipeline.main()
     year = datetime.now(timezone.utc).year
-    shared = {"first_year": 2011, "last_year": year, "initial_target": 100_000, "incremental_limit": 3000, "time_budget": 15.0}
-    assert seen["openalex"] == shared
-    assert seen["scopus"] == {"query": "TITLE(test)", **shared}
+    shared = {"first_year": 2011, "last_year": year, "initial_target": 100_000, "incremental_limit": 6000}
+    # 80 s of ingestion per two-minute cycle, 60% to Scopus, which is the slower source.
+    assert seen["openalex"] == {**shared, "time_budget": 32.0}
+    assert seen["scopus"] == {"query": "TITLE(test)", **shared, "time_budget": 48.0, "requests_per_second": 5.0}
     report = json.loads(capsys.readouterr().out)
     assert report["scopus_status"] == "quota_exceeded"
     assert report["event"] == "pipeline_partial"
@@ -69,6 +71,26 @@ def test_environment_overrides_range_and_budgets(monkeypatch):
     pipeline.main()
     # Without a Scopus query OpenAlex is the only source, so it gets the whole budget.
     assert seen == {"first_year": 2015, "last_year": 2020, "initial_target": 500, "incremental_limit": 50, "time_budget": 20.0}
+
+
+def test_scopus_share_and_request_rate_come_from_the_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setenv("SCOPUS_QUERY", "TITLE(test)")
+    monkeypatch.setenv("INGEST_TIME_BUDGET_SECONDS", "40")
+    monkeypatch.setenv("INGEST_SCOPUS_SHARE", "0.25")
+    monkeypatch.setenv("SCOPUS_REQUESTS_PER_SECOND", "7")
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: seen.setdefault("openalex", kw) and [openalex_summary()])
+    monkeypatch.setattr(pipeline, "ingest_scopus", lambda root, **kw: seen.setdefault("scopus", kw) and [scopus_summary()])
+    pipeline.main()
+    assert seen["scopus"]["time_budget"] == 10.0 and seen["openalex"]["time_budget"] == 30.0
+    assert seen["scopus"]["requests_per_second"] == 7.0
+
+
+def test_report_includes_the_duration_of_each_phase(monkeypatch, capsys):
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
+    pipeline.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["ingestion_seconds"] >= 0 and report["silver_seconds"] >= 0
 
 
 def test_scopus_is_skipped_without_a_configured_query(monkeypatch, capsys):

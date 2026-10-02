@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +19,12 @@ from src.spark_pipeline import process_pending_batches
 COMPLETE = {"completed", "completed_target", "completed_exhausted"}
 SCOPUS_SETTLED = {"completed_target", "completed_exhausted", "result_window_reached"}
 DEFAULT_FIRST_YEAR = 2011
-DEFAULT_TIME_BUDGET_SECONDS = 30.0
+# The scheduler runs every two minutes: 80 s of ingestion leaves about 40 s for Spark and
+# compaction. Scopus is the slower source, so it gets the larger share.
+DEFAULT_TIME_BUDGET_SECONDS = 80.0
+DEFAULT_SCOPUS_SHARE = 0.6
+# Elsevier allows 9 requests per second per key; stay well below it.
+DEFAULT_SCOPUS_REQUESTS_PER_SECOND = 5.0
 
 
 def _overall(statuses: list[str], settled: set[str]) -> str | None:
@@ -31,19 +37,19 @@ def main() -> None:
     silver_root = Path(os.environ.get("SILVER_PATH", "/data/silver"))
     # One year range and one budget for both sources keeps their samples comparable.
     scopus_query = os.environ.get("SCOPUS_QUERY", "").strip()
-    # The scheduler runs every minute: ingestion gets a fixed slice of it, shared by
-    # the active sources, so Spark and compaction always fit before the next run.
     total_budget = float(os.environ.get("INGEST_TIME_BUDGET_SECONDS") or DEFAULT_TIME_BUDGET_SECONDS)
+    scopus_share = float(os.environ.get("INGEST_SCOPUS_SHARE") or DEFAULT_SCOPUS_SHARE)
+    scopus_budget = total_budget * scopus_share if scopus_query else 0.0
     shared = {
         "first_year": int(os.environ.get("INGEST_FIRST_YEAR") or DEFAULT_FIRST_YEAR),
         "last_year": int(os.environ.get("INGEST_LAST_YEAR") or datetime.now(timezone.utc).year),
         "initial_target": int(os.environ.get("INGEST_INITIAL_TARGET") or 100_000),
         # With a time budget this is only a safety cap on records per run.
-        "incremental_limit": int(os.environ.get("INCREMENTAL_LIMIT") or 3000),
-        "time_budget": total_budget / (2 if scopus_query else 1),
+        "incremental_limit": int(os.environ.get("INCREMENTAL_LIMIT") or 6000),
     }
+    started = time.monotonic()
     try:
-        openalex = ingest_openalex(bronze_root, **shared)
+        openalex = ingest_openalex(bronze_root, **shared, time_budget=total_budget - scopus_budget)
         openalex_status = _overall([summary.status for summary in openalex], COMPLETE) or "completed"
     except OpenAlexRequestError as exc:
         openalex, openalex_status = [], exc.status
@@ -51,12 +57,16 @@ def main() -> None:
     scopus_status = None
     if scopus_query:
         try:
-            scopus = ingest_scopus(bronze_root, query=scopus_query, **shared)
+            scopus = ingest_scopus(
+                bronze_root, query=scopus_query, **shared, time_budget=scopus_budget,
+                requests_per_second=float(os.environ.get("SCOPUS_REQUESTS_PER_SECOND") or DEFAULT_SCOPUS_REQUESTS_PER_SECOND),
+            )
             scopus_status = _overall([summary.status for summary in scopus], SCOPUS_SETTLED)
         except IngestionError:
             # The message is already sanitized, and Silver must still run.
             scopus_status = "failed"
 
+    ingested = time.monotonic()
     # A local master keeps the single-container exercise self-contained. The
     # same processing function can receive a cluster SparkSession in deployment.
     spark = (
@@ -75,6 +85,7 @@ def main() -> None:
         )
     finally:
         spark.stop()
+    silver_seconds = time.monotonic() - ingested
 
     # Only non-sensitive counts and identifiers are emitted. The API client
     # deliberately sanitizes transport errors before they reach this process.
@@ -87,6 +98,8 @@ def main() -> None:
                 "batch_mode": openalex[-1].mode if openalex else None,
                 "ingested_records": sum(summary.records for summary in openalex),
                 "ingested_pages": sum(summary.pages for summary in openalex),
+                "ingestion_seconds": round(ingested - started, 1),
+                "silver_seconds": round(silver_seconds, 1),
                 "openalex_status": openalex_status,
                 "scopus_batch_id": scopus[-1].batch_id if scopus else None,
                 "scopus_status": scopus_status,
