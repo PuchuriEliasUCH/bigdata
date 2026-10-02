@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 import src.run_pipeline as pipeline
+from src.compaction import CompactionSummary
 from src.openalex_ingest import OpenAlexRequestError
 
 
@@ -11,7 +12,7 @@ from src.openalex_ingest import OpenAlexRequestError
 def isolated_environment(tmp_path, monkeypatch):
     """Keep container .env values from reaching real APIs and point every zone at tmp_path."""
     for name in ("SCOPUS_QUERY", "SCOPUS_API", "INGEST_FIRST_YEAR", "INGEST_LAST_YEAR",
-                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT"):
+                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
@@ -20,7 +21,7 @@ def isolated_environment(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def fake_spark(monkeypatch):
     """Replace Spark so these tests only exercise orchestration."""
-    calls = {"processed": ()}
+    calls = {"processed": (), "compaction": [], "compacted": ()}
 
     class Builder:
         def master(self, value): return self
@@ -29,6 +30,7 @@ def fake_spark(monkeypatch):
         def getOrCreate(self): return type("Spark", (), {"stop": lambda self: None})()
 
     monkeypatch.setattr(pipeline.SparkSession, "builder", Builder())
+    monkeypatch.setattr(pipeline, "compact_pending", lambda spark, bronze, silver, min_batches: calls["compaction"].append((bronze, silver, min_batches)) or CompactionSummary(calls["compacted"], ()))
     monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver: type(
         "Result", (), dict(processed_batches=calls["processed"], skipped_batches=(), valid_rows=0, rejected_rows=0))())
     return calls
@@ -110,3 +112,18 @@ def test_pipeline_stops_at_silver_and_reports_no_gold(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert not hasattr(pipeline, "build_gold")
     assert not any("gold" in key for key in report)
+
+
+def test_pipeline_compacts_silver_after_processing_with_the_default_threshold(tmp_path, monkeypatch, capsys, fake_spark):
+    fake_spark["compacted"] = ("openalex-2024-0001",)
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
+    pipeline.main()
+    assert fake_spark["compaction"] == [(tmp_path / "bronze", tmp_path / "silver", 10)]
+    assert json.loads(capsys.readouterr().out)["compacted_groups"] == ["openalex-2024-0001"]
+
+
+def test_compaction_threshold_comes_from_the_environment(tmp_path, monkeypatch, fake_spark):
+    monkeypatch.setenv("COMPACT_MIN_BATCHES", "3")
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
+    pipeline.main()
+    assert fake_spark["compaction"][0][2] == 3

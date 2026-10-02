@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
+from src.compaction import compact_pending
 from src.ingestion import ingest_openalex, ingest_scopus
 from src.openalex_ingest import IngestionError, OpenAlexRequestError
 from src.spark_pipeline import process_pending_batches
@@ -60,6 +61,12 @@ def main() -> None:
     )
     try:
         processing = process_pending_batches(spark, bronze_root, silver_root)
+        # Small batches pile up (one per Scopus window, one per OpenAlex increment);
+        # compaction only acts once a source and year have enough of them.
+        compaction = compact_pending(
+            spark, bronze_root, silver_root,
+            min_batches=int(os.environ.get("COMPACT_MIN_BATCHES") or 10),
+        )
     finally:
         spark.stop()
 
@@ -79,6 +86,8 @@ def main() -> None:
                 "scopus_status": scopus_status,
                 "processed_batches": processing.processed_batches,
                 "skipped_batches": processing.skipped_batches,
+                "compacted_groups": list(compaction.groups),
+                "compaction_skipped": list(compaction.skipped),
                 "valid_rows": processing.valid_rows,
                 "rejected_rows": processing.rejected_rows,
             },
