@@ -9,7 +9,7 @@ El pipeline puede consultar ambas fuentes, pero no lo hace siempre: OpenAlex se 
 | Configuración | Acción Scopus |
 |---|---|
 | `SCOPUS_QUERY` vacía o ausente | Se omite |
-| Consulta presente y sin el par completo `SCOPUS_FIRST_YEAR` / `SCOPUS_LAST_YEAR` | Ingesta ordinaria |
+| Consulta presente y sin el par completo `SCOPUS_FIRST_YEAR` / `SCOPUS_LAST_YEAR` | Consulta completa, dividida en ventanas de fecha de carga si supera 5 000 resultados |
 | Consulta y ambos años presentes | Ingesta particionada por año |
 
 La partición anual restringe cada consulta mediante `PUBYEAR`, para separar los intervalos solicitados. Configurar solo uno de los años no activa esa modalidad.

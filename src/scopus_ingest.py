@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import date, timedelta
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,37 @@ def split_year_range(query: str, first_year: int, last_year: int) -> list[str]:
     if not query or first_year > last_year:
         raise ValueError("A query and ascending year range are required")
     return [f"({query}) AND PUBYEAR = {year}" for year in range(first_year, last_year + 1)]
+
+
+FLOOR_LOAD_DATE = date(1960, 1, 1)
+# Fixed ceiling: split points must be identical on every run or stored partitions would be refetched.
+CEILING_LOAD_DATE = date(2040, 1, 1)
+Window = tuple["date | None", "date | None"]
+
+
+def window_query(base_query: str, low: date | None, high: date | None) -> str:
+    """Restrict a query to inclusive load dates; None leaves that side open.
+
+    AFT and BEF are exclusive in Scopus, so the bounds sit one day outside.
+    """
+    if low is None and high is None:
+        return base_query
+    clauses = [f"({base_query})"]
+    if low is not None:
+        clauses.append(f"ORIG-LOAD-DATE AFT {(low - timedelta(days=1)):%Y%m%d}")
+    if high is not None:
+        clauses.append(f"ORIG-LOAD-DATE BEF {(high + timedelta(days=1)):%Y%m%d}")
+    return " AND ".join(clauses)
+
+
+def split_window(low: date | None, high: date | None, ceiling: date = CEILING_LOAD_DATE) -> list[Window]:
+    """Split a load-date window in two disjoint halves that keep its open ends."""
+    start = low or FLOOR_LOAD_DATE
+    end = high or ceiling
+    if start >= end:
+        return []
+    middle = start + timedelta(days=(end - start).days // 2)
+    return [(low, middle), (middle + timedelta(days=1), high)]
 
 
 @dataclass(frozen=True)
@@ -66,6 +98,7 @@ def run_scopus_ingestion(
     result_window: int = 5000,
     requests_per_second: float = 2.0,
     max_retries: int = 2,
+    split_oversized: bool = False,
 ) -> ScopusSummary:
     if not query or (target_records is not None and target_records < 1) or initial_target_records < 1 or not 1 <= page_size <= 200 or result_window < 1 or max_retries < 0:
         raise IngestionError("Invalid Scopus query or pagination settings")
@@ -73,7 +106,7 @@ def run_scopus_ingestion(
     api = client or ScopusClient.from_environment()
     with store.lock():
         history = [m for m in store.list_metadata() if m.get("source") == "scopus" and m.get("query") == query]
-        candidates = [m for m in history if m.get("status") not in {"completed_target", "completed_exhausted", "failed"}]
+        candidates = [m for m in history if m.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized"}]
         if len(candidates) > 1:
             raise BatchStateError("Multiple Scopus batches match this query")
         previous = max((m for m in history if m.get("status") in {"completed_target", "completed_exhausted"}), key=lambda m: m.get("created_at", ""), default=None)
@@ -165,6 +198,12 @@ def run_scopus_ingestion(
             except (ValueError, KeyError, TypeError, IndexError):
                 metadata["status"] = "failed"
                 break
+            if split_oversized and metadata["page_count"] == 0 and total > result_window:
+                # The first page already reveals the total, so the caller can split
+                # this query without storing records its sub-windows will fetch again.
+                metadata["total_results"] = total
+                metadata["status"] = "oversized"
+                break
             if not entries:
                 metadata["status"] = "completed_exhausted" if offset >= total else "failed"
                 break
@@ -192,41 +231,94 @@ def run_scopus_years(
     bronze_root: str | Path,
     *,
     query: str,
-    first_year: int,
-    last_year: int,
+    first_year: int | None = None,
+    last_year: int | None = None,
     client: ScopusClient | None = None,
     initial_target_records: int = DEFAULT_INITIAL_TARGET,
     target_records: int | None = None,
+    split_oversized: bool = True,
+    ceiling: date = CEILING_LOAD_DATE,
     **options: Any,
 ) -> list[ScopusSummary]:
-    """Continue disjoint yearly queries, stopping at the first unresolved partition."""
+    """Ingest a query as disjoint partitions that each fit the result window.
+
+    Partitions are years (when a range is given) and, for any partition above the
+    window, recursive load-date halves that cover all history. The first runs fill
+    the initial target; later runs spend an incremental budget until results end.
+    """
+    if (first_year is None) != (last_year is None):
+        raise ValueError("first_year and last_year must be set together")
     store = BatchStateStore(Path(bronze_root), "scopus")
     api = client or ScopusClient.from_environment()
-    summaries = []
-    for partition_query in split_year_range(query, first_year, last_year):
+    base_queries = split_year_range(query, first_year, last_year) if first_year is not None else [query]
+    summaries: list[ScopusSummary] = []
+
+    def scopus_history() -> list[dict[str, Any]]:
+        return [record for record in store.list_metadata() if record.get("source") == "scopus"]
+
+    def initial_total(history: list[dict[str, Any]]) -> int:
+        return sum(int(record.get("record_count", 0)) for record in history if record.get("mode") == "initial")
+
+    start_history = scopus_history()
+    incremental_run = initial_total(start_history) >= initial_target_records and not any(
+        record.get("mode") == "initial" and record.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}
+        for record in start_history
+    )
+    budget = (target_records or DEFAULT_INCREMENTAL_LIMIT) if incremental_run else None
+
+    def advance(partition_query: str, can_split: bool) -> str:
+        """Return done, split or stop for one partition."""
+        nonlocal budget
         while True:
-            history = [record for record in store.list_metadata() if record.get("source") == "scopus"]
-            existing = [record for record in history if record.get("query") == partition_query and record.get("status") in {"completed_target", "completed_exhausted"}]
-            in_progress = [record for record in history if record.get("query") == partition_query and record.get("mode") == "initial" and record.get("status") not in {"completed_target", "completed_exhausted", "failed"}]
+            history = scopus_history()
+            mine = [record for record in history if record.get("query") == partition_query]
+            if any(record.get("status") == "oversized" for record in mine):
+                return "split"
+            if any(record.get("status") == "result_window_reached" for record in mine):
+                return "done"
+            existing = [record for record in mine if record.get("status") in {"completed_target", "completed_exhausted"}]
+            in_progress = [record for record in mine if record.get("mode") == "initial" and record.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}]
             last = max(existing, key=lambda record: record.get("created_at", ""), default=None)
-            initial_records = sum(int(record.get("record_count", 0)) for record in history if record.get("mode") == "initial")
-            remaining_initial = max(0, initial_target_records - initial_records)
-            if remaining_initial == 0 and not in_progress:
-                return summaries
             if last and (last["status"] == "completed_exhausted" or last.get("next_offset", 0) >= last.get("total_results", float("inf"))):
                 if not summaries or summaries[-1].batch_id != last["batch_id"]:
                     summaries.append(ScopusSummary(last["batch_id"], last["status"], last["record_count"], last["_metadata_path"]))
-                break
+                return "done"
+            if budget is not None:
+                if budget <= 0:
+                    return "stop"
+                batch_target, batch_initial = budget, initial_target_records
+            else:
+                remaining_initial = max(0, initial_target_records - initial_total(history))
+                if remaining_initial == 0 and not in_progress:
+                    return "stop"
+                batch_target = target_records
+                batch_initial = initial_target_records if in_progress else remaining_initial
             summary = run_scopus_ingestion(bronze_root, query=partition_query, client=api,
-                                           initial_target_records=initial_target_records if in_progress else remaining_initial,
-                                           target_records=target_records, **options)
+                                           initial_target_records=batch_initial, target_records=batch_target,
+                                           split_oversized=can_split, **options)
+            if summary.status == "oversized":
+                return "split"
             summaries.append(summary)
+            if budget is not None:
+                budget -= summary.records
+            if summary.status == "result_window_reached":
+                return "done"
             checkpoint = next(record for record in store.list_metadata() if record["batch_id"] == summary.batch_id)
             if summary.status == "completed_exhausted" or (summary.status == "completed_target" and checkpoint.get("next_offset", 0) >= checkpoint.get("total_results", float("inf"))):
-                break
+                return "done"
             if summary.status != "completed_target":
+                return "stop"
+            if budget is None and initial_total(scopus_history()) >= initial_target_records:
+                return "stop"
+
+    for base_query in base_queries:
+        pending: list[Window] = [(None, None)]
+        while pending:
+            low, high = pending.pop()
+            halves = split_window(low, high, ceiling) if split_oversized else []
+            outcome = advance(window_query(base_query, low, high), can_split=bool(halves))
+            if outcome == "stop":
                 return summaries
-            updated = store.list_metadata()
-            if sum(int(record.get("record_count", 0)) for record in updated if record.get("mode") == "initial") >= initial_target_records:
-                return summaries
+            if outcome == "split":
+                pending.extend(reversed(halves))
     return summaries

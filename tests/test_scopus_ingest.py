@@ -1,9 +1,18 @@
 import json
+import re
+from datetime import date
 
 import pytest
 import requests
 
-from src.scopus_ingest import ScopusClient, run_scopus_ingestion, run_scopus_years, split_year_range
+from src.scopus_ingest import (
+    ScopusClient,
+    run_scopus_ingestion,
+    run_scopus_years,
+    split_window,
+    split_year_range,
+    window_query,
+)
 
 
 class Response:
@@ -209,3 +218,112 @@ def test_year_orchestrator_keeps_paging_year_before_advancing(tmp_path):
     summaries = run_scopus_years(tmp_path, query="TITLE(test)", first_year=2020, last_year=2021, client=ScopusClient("secret", session=session), target_records=1)
     assert session.starts == [0, 1, 0]
     assert len(summaries) == 3
+
+
+class CorpusSession:
+    """Fake Scopus API that evaluates PUBYEAR and ORIG-LOAD-DATE AFT/BEF predicates."""
+
+    def __init__(self, corpus):
+        self.corpus = corpus  # (eid, publication year, load date as YYYYMMDD int)
+        self.calls = []
+
+    def get(self, url, *, params, headers, timeout):
+        query = params["query"]
+        self.calls.append(query)
+        year = int(re.search(r"PUBYEAR = (\d{4})", query).group(1))
+        after = re.search(r"ORIG-LOAD-DATE AFT (\d{8})", query)
+        before = re.search(r"ORIG-LOAD-DATE BEF (\d{8})", query)
+        rows = [
+            eid for eid, y, loaded in self.corpus
+            if y == year
+            and (not after or loaded > int(after.group(1)))
+            and (not before or loaded < int(before.group(1)))
+        ]
+        start, count = params["start"], params["count"]
+        return Response([{"eid": eid} for eid in rows[start:start + count]], len(rows))
+
+
+def ingested_eids(root):
+    eids = []
+    for page in (root / "scopus").glob("*/page-*.json"):
+        eids += [entry["eid"] for entry in json.loads(page.read_text())["search-results"]["entry"]]
+    return eids
+
+
+def _leaves(lo, hi, ceiling, depth):
+    children = split_window(lo, hi, ceiling) if depth else []
+    if not children:
+        return [(lo, hi)]
+    return [leaf for child in children for leaf in _leaves(*child, ceiling, depth - 1)]
+
+
+def test_window_query_keeps_whole_history_query_unchanged():
+    assert window_query("(TITLE(test)) AND PUBYEAR = 2020", None, None) == "(TITLE(test)) AND PUBYEAR = 2020"
+
+
+def test_window_query_uses_exclusive_load_date_bounds():
+    query = window_query("Q", date(2020, 1, 1), date(2020, 1, 3))
+    assert query == "(Q) AND ORIG-LOAD-DATE AFT 20191231 AND ORIG-LOAD-DATE BEF 20200104"
+    assert window_query("Q", None, date(2020, 1, 3)) == "(Q) AND ORIG-LOAD-DATE BEF 20200104"
+    assert window_query("Q", date(2020, 1, 1), None) == "(Q) AND ORIG-LOAD-DATE AFT 20191231"
+
+
+def test_split_window_is_disjoint_and_exhaustive_over_all_history():
+    ceiling = date(2021, 6, 1)
+    leaves = _leaves(None, None, ceiling, depth=6)
+    assert leaves[0][0] is None and leaves[-1][1] is None
+    for (_, previous_hi), (next_lo, _) in zip(leaves, leaves[1:]):
+        assert (next_lo - previous_hi).days == 1
+
+
+def test_split_window_stops_at_a_single_day():
+    assert split_window(date(2020, 6, 15), date(2020, 6, 15), date(2021, 6, 1)) == []
+
+
+def test_oversized_year_is_bisected_until_every_window_fits(tmp_path):
+    corpus = [(f"e{i}", 2020, loaded) for i, loaded in enumerate(
+        [20191230, 20200105, 20200110, 20200301, 20200302, 20200615,
+         20200901, 20201015, 20201201, 20210101, 20210301, 20210315])]
+    session = CorpusSession(corpus)
+    summaries = run_scopus_years(
+        tmp_path, query="TITLE(test)", first_year=2020, last_year=2020,
+        client=ScopusClient("secret", session=session), result_window=5, page_size=5,
+        requests_per_second=0, ceiling=date(2021, 6, 1),
+    )
+    assert sorted(ingested_eids(tmp_path)) == sorted(eid for eid, _, _ in corpus)
+    assert all(summary.status != "oversized" for summary in summaries)
+
+
+def test_capped_single_day_does_not_block_the_next_year_or_loop_on_rerun(tmp_path):
+    corpus = [(f"a{i}", 2020, 20200615) for i in range(8)] + [("b0", 2021, 20210101), ("b1", 2021, 20210102)]
+    session = CorpusSession(corpus)
+    options = dict(
+        query="TITLE(test)", first_year=2020, last_year=2021,
+        client=ScopusClient("secret", session=session), result_window=5, page_size=5,
+        requests_per_second=0, ceiling=date(2021, 6, 1),
+    )
+    first = run_scopus_years(tmp_path, **options)
+    assert {"b0", "b1"} <= set(ingested_eids(tmp_path))
+    assert "result_window_reached" in {summary.status for summary in first}
+    requests_after_first = len(session.calls)
+    run_scopus_years(tmp_path, **options)
+    assert len(session.calls) == requests_after_first
+
+
+def test_incremental_runs_continue_after_initial_target_until_results_end(tmp_path):
+    corpus = [(f"e{i}", 2020, 20200101 + i) for i in range(5)]
+    session = CorpusSession(corpus)
+    options = dict(
+        query="TITLE(test)", first_year=2020, last_year=2020,
+        client=ScopusClient("secret", session=session), page_size=1,
+        requests_per_second=0, ceiling=date(2021, 6, 1),
+    )
+    run_scopus_years(tmp_path, initial_target_records=2, **options)
+    assert len(ingested_eids(tmp_path)) == 2
+    run_scopus_years(tmp_path, initial_target_records=2, target_records=2, **options)
+    assert len(ingested_eids(tmp_path)) == 4
+    run_scopus_years(tmp_path, initial_target_records=2, target_records=2, **options)
+    assert sorted(ingested_eids(tmp_path)) == sorted(eid for eid, _, _ in corpus)
+    calls = len(session.calls)
+    run_scopus_years(tmp_path, initial_target_records=2, target_records=2, **options)
+    assert len(session.calls) == calls

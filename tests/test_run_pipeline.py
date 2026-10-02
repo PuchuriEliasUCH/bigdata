@@ -22,7 +22,7 @@ def test_scheduler_runs_scopus_when_query_is_configured(tmp_path, monkeypatch, c
     monkeypatch.setenv("SCOPUS_QUERY", "TITLE(test)")
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
-    monkeypatch.setattr(pipeline, "run_scopus_ingestion", lambda root, query: calls.append(query) or Summary())
+    monkeypatch.setattr(pipeline, "run_scopus_years", lambda root, **kwargs: calls.append(kwargs) or [Summary()])
     monkeypatch.setattr(pipeline, "run_ingestion", lambda root: type("OpenAlex", (), dict(batch_id="oa", mode="initial", status="completed_target", records=1, pages=1))())
     class FakeSpark:
         def stop(self):
@@ -35,7 +35,7 @@ def test_scheduler_runs_scopus_when_query_is_configured(tmp_path, monkeypatch, c
     monkeypatch.setattr(pipeline.SparkSession, "builder", FakeBuilder())
     monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver: type("Result", (), dict(processed_batches=(), skipped_batches=(), valid_rows=0, rejected_rows=0))())
     pipeline.main()
-    assert calls == ["TITLE(test)"]
+    assert calls == [{"query": "TITLE(test)", "first_year": None, "last_year": None}]
     assert json.loads(capsys.readouterr().out)["scopus_status"] == "quota_exceeded"
 
 
@@ -46,7 +46,7 @@ def test_openalex_rate_failure_does_not_prevent_scopus_and_pending_silver(tmp_pa
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
     monkeypatch.setattr(pipeline, "run_ingestion", lambda root: (_ for _ in ()).throw(OpenAlexRequestError("OpenAlex request failed", "rate_limited")))
     seen = []
-    monkeypatch.setattr(pipeline, "run_scopus_ingestion", lambda root, query: seen.append(query) or type("Summary", (), dict(batch_id="scopus", status="completed_target"))())
+    monkeypatch.setattr(pipeline, "run_scopus_years", lambda root, **kwargs: seen.append(kwargs["query"]) or [type("Summary", (), dict(batch_id="scopus", status="completed_target"))()])
     class Builder:
         def master(self, value): return self
         def appName(self, value): return self

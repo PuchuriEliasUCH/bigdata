@@ -15,8 +15,8 @@ Complete massive Scopus ingestion (100,000 initial records, then minute-by-minut
 - Control/state files stay JSON; data layers become Parquet (Task B).
 
 ## Tasks
-- [ ] SWB-0 Baseline: run tests, commit pending work in work units (feature branch).
-- [ ] SWB-1 Scopus bisection: yearly query, bisect by `ORIG-LOAD-DATE` windows until each < 5,000; capped partition does not block others; cron re-run safe. (Task A)
+- [x] SWB-0 Baseline: 57 tests passed; commits 1a6fb3d, dcf1f1c.
+- [x] SWB-1 Scopus bisection (64 tests passed; route: inline, no delegation because the subagent writer hung): yearly query, bisect by `ORIG-LOAD-DATE` windows until each < 5,000; capped partition does not block others; cron re-run safe. (Task A)
 - [ ] SWB-2 Search criteria: OpenAlex filter + Scopus query cleanup + docs. (Task C)
 - [ ] SWB-3 Parquet end to end: Bronze pages, rejected, Gold layer. (Task B)
 
