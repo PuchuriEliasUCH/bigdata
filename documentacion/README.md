@@ -6,7 +6,7 @@ Esta documentación explica cómo se seleccionan OpenAlex y Scopus, cómo se alm
 
 ```text
 OpenAlex (siempre se intenta) ─┐
-Scopus (solo si hay consulta) ──┴─> Bronze: páginas JSON + metadatos de lote
+Scopus (solo si hay consulta) ──┴─> Bronze: páginas Parquet + metadatos de lote
                                       │ lotes completos con páginas
                                       v
                                   Spark local

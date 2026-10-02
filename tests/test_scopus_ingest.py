@@ -2,6 +2,7 @@ import json
 import re
 from datetime import date
 
+import pyarrow.parquet as pq
 import pytest
 import requests
 
@@ -46,12 +47,12 @@ def test_scopus_target_checkpoint_and_resume(tmp_path):
     assert metadata["next_offset"] == 1
     assert metadata["next_attempt_at"] == "1"
     assert "secret" not in stopped.metadata_path.read_text()
-    assert len(list((tmp_path / "scopus" / stopped.batch_id).glob("page-*.json"))) == 1
+    assert len(list((tmp_path / "scopus" / stopped.batch_id).glob("page-*.parquet"))) == 1
     resumed = Session([Response([{"eid": "b"}], 3), Response([{"eid": "c"}], 3)])
     done = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=resumed), query="TITLE(test)", target_records=3, page_size=1)
     assert done.status == "completed_target"
     assert resumed.starts == [1, 2]
-    assert len(list((tmp_path / "scopus" / done.batch_id).glob("page-*.json"))) == 3
+    assert len(list((tmp_path / "scopus" / done.batch_id).glob("page-*.parquet"))) == 3
 
 
 def test_scopus_window_is_not_exhaustion(tmp_path):
@@ -245,8 +246,8 @@ class CorpusSession:
 
 def ingested_eids(root):
     eids = []
-    for page in (root / "scopus").glob("*/page-*.json"):
-        eids += [entry["eid"] for entry in json.loads(page.read_text())["search-results"]["entry"]]
+    for page in (root / "scopus").glob("*/page-*.parquet"):
+        eids += [json.loads(row["record_json"])["eid"] for row in pq.read_table(page).to_pylist()]
     return eids
 
 

@@ -27,8 +27,8 @@ La tarea de `scheduler/pipeline.cron` está configurada para ejecutarse cada min
 ## Rutas de datos
 
 ```text
-data/bronze/openalex/<batch-id>/       páginas JSON OpenAlex
-data/bronze/scopus/<batch-id>/         páginas JSON Scopus
+data/bronze/openalex/<batch-id>/       páginas Parquet OpenAlex
+data/bronze/scopus/<batch-id>/         páginas Parquet Scopus
 data/bronze/batch_metadata/            estado compartido de lotes
 data/bronze/rejected/<batch-id>/       registros rechazados
 data/silver/works/<batch-id>/          Parquet aceptado (Snappy)

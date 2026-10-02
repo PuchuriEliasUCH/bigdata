@@ -115,7 +115,68 @@ def _raw_page_paths(bronze_root: Path, metadata: dict[str, Any]) -> list[Path]:
             path = Path(str(value))
             paths.append(path if path.is_absolute() else bronze_root / path)
         return sorted(paths)
-    return sorted(raw_page_dir.glob("page-*.json"))
+    return sorted([*raw_page_dir.glob("page-*.json"), *raw_page_dir.glob("page-*.parquet")])
+
+
+def _page_number_column() -> F.Column:
+    return F.regexp_extract(F.col("_page_path"), r"page-(\d+)\.json$", 1).cast("int")
+
+
+def _load_records(
+    spark: SparkSession, batch_id: str, page_paths: list[Path], source: str
+) -> DataFrame:
+    """Return one row per record with its raw JSON text and a deterministic order.
+
+    Parquet pages are the current Bronze format; JSON pages written before that
+    stay readable, and a batch resumed across the change may contain both.
+    """
+    frames: list[DataFrame] = []
+    parquet_paths = [path for path in page_paths if path.suffix == ".parquet"]
+    json_paths = [path for path in page_paths if path.suffix != ".parquet"]
+    if parquet_paths:
+        frames.append(
+            spark.read.parquet(*[str(path) for path in parquet_paths]).select(
+                F.col("record_json").alias("_record_json"),
+                ((F.col("page_number") - F.lit(1)) * F.lit(1000) + F.col("record_index"))
+                .cast("int")
+                .alias("record_order"),
+            )
+        )
+    if json_paths:
+        page_schema = SCOPUS_PAGE_SCHEMA if source == "scopus" else RAW_PAGE_SCHEMA
+        pages = (
+            spark.read.option("wholetext", "true")
+            .text([str(path) for path in json_paths])
+            .withColumn("_page_path", F.input_file_name())
+            .withColumn("_page", F.from_json(F.col("value"), page_schema))
+        )
+        results = F.col("_page.`search-results`.entry") if source == "scopus" else F.col("_page.results")
+        invalid_page = pages.filter(
+            F.col("_page").isNull() | results.isNull()
+        ).select("_page_path").first()
+        if invalid_page is not None:
+            page_name = str(invalid_page["_page_path"]).rsplit("/", 1)[-1]
+            raise ProcessingError(f"Bronze page {page_name} has no results list")
+        # Bronze caps each page below 1000 records, so page and index give a stable
+        # order without globally sorting rows that still carry the raw JSON.
+        frames.append(
+            pages.select(
+                "_page_path", F.posexplode(results).alias("_record_index", "_record_json")
+            ).select(
+                F.coalesce(F.col("_record_json"), F.lit("null")).alias("_record_json"),
+                F.when(
+                    _page_number_column() > 0,
+                    (_page_number_column() - F.lit(1)) * F.lit(1000) + F.col("_record_index"),
+                )
+                .otherwise(F.col("_record_index"))
+                .cast("int")
+                .alias("record_order"),
+            )
+        )
+    combined = frames[0]
+    for other in frames[1:]:
+        combined = combined.unionByName(other)
+    return combined
 
 
 def _load_batch_dataframe(
@@ -126,38 +187,19 @@ def _load_batch_dataframe(
     if not page_paths:
         raise ProcessingError(f"Bronze batch {batch_id} has no raw page files")
     for page_path in page_paths:
-        if not page_path.is_file():
+        if not page_path.exists():
             raise ProcessingError(f"Unable to read Bronze page {page_path.name}")
 
     source = metadata.get("source", "openalex")
-    page_schema = SCOPUS_PAGE_SCHEMA if source == "scopus" else RAW_PAGE_SCHEMA
-    pages = (
-        spark.read.option("wholetext", "true")
-        .text([str(path) for path in page_paths])
-        .withColumn("_page_path", F.input_file_name())
-        .withColumn("_page", F.from_json(F.col("value"), page_schema))
-    )
-    results = F.col("_page.`search-results`.entry") if source == "scopus" else F.col("_page.results")
-    invalid_page = pages.filter(
-        F.col("_page").isNull() | results.isNull()
-    ).select("_page_path").first()
-    if invalid_page is not None:
-        page_name = str(invalid_page["_page_path"]).rsplit("/", 1)[-1]
-        raise ProcessingError(f"Bronze page {page_name} has no results list")
-
-    records = pages.select(
-        "_page_path",
-        F.posexplode(results).alias("_record_index", "_record_json"),
-    )
+    records = _load_records(spark, batch_id, page_paths, source)
     if source == "scopus":
         def field(name: str) -> F.Column:
             return F.trim(F.get_json_object(F.col("_record_json"), f"$.{name}"))
 
         date = field("prism:coverDate")
-        page_number = F.regexp_extract(F.col("_page_path"), r"page-(\d+)\.json$", 1).cast("int")
         return records.select(
             F.lit(batch_id).alias("batch_id"),
-            ((page_number - F.lit(1)) * F.lit(1000) + F.col("_record_index")).cast("int").alias("record_order"),
+            "record_order",
             F.col("_record_json").alias("record_json"),
             field("eid").alias("openalex_id"),
             field("dc:title").alias("title"),
@@ -195,19 +237,10 @@ def _load_batch_dataframe(
     publication_year_text = F.trim(json_value("$.publication_year"))
     cited_by_count_text = F.trim(json_value("$.cited_by_count"))
     is_oa_text = json_value("$.open_access.is_oa")
-    page_number = F.regexp_extract(F.col("_page_path"), r"page-(\d+)\.json$", 1).cast(
-        IntegerType()
-    )
-    # Bronze ingestion caps each page at 200 records, so this keeps page order
-    # deterministic without globally sorting rows that still carry record_json.
-    record_order = F.when(
-        page_number > 0,
-        (page_number - F.lit(1)) * F.lit(1000) + F.col("_record_index"),
-    ).otherwise(F.col("_record_index"))
     return records.select(
         F.lit(batch_id).alias("batch_id"),
-        record_order.cast(IntegerType()).alias("record_order"),
-        F.coalesce(F.col("_record_json"), F.lit("null")).alias("record_json"),
+        "record_order",
+        F.col("_record_json").alias("record_json"),
         F.trim(json_value("$.id")).alias("openalex_id"),
         F.trim(json_value("$.title")).alias("title"),
         F.when(
@@ -402,7 +435,7 @@ def _process_one_batch(
         .option("compression", "snappy")
         .parquet(str(silver_path))
     )
-    rejected.write.mode("overwrite").json(str(rejected_path))
+    rejected.write.mode("overwrite").option("compression", "snappy").parquet(str(rejected_path))
     return accepted.count(), rejected.count()
 
 

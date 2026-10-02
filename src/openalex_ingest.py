@@ -211,14 +211,28 @@ class BatchStateStore:
         return target
 
     def write_raw_page(self, batch_id: str, page_number: int, payload: dict[str, Any]) -> Path:
+        """Store one API page as Parquet: one row per record, kept as its original JSON text."""
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if isinstance(payload.get("results"), list):
+            records = payload["results"]
+        else:
+            records = payload.get("search-results", {}).get("entry") or []
         batch_dir = self.raw_dir / batch_id
         batch_dir.mkdir(parents=True, exist_ok=True)
-        target = batch_dir / f"page-{page_number:06d}.json"
+        target = batch_dir / f"page-{page_number:06d}.parquet"
         temporary = batch_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False),
-            encoding="utf-8",
+        table = pa.table(
+            {
+                "batch_id": pa.array([batch_id] * len(records), pa.string()),
+                "page_number": pa.array([page_number] * len(records), pa.int32()),
+                "record_index": pa.array(range(len(records)), pa.int32()),
+                "record_json": pa.array([json.dumps(record, ensure_ascii=False) for record in records], pa.string()),
+            }
         )
+        pq.write_table(table, temporary, compression="snappy")
         os.replace(temporary, target)
         return target
 

@@ -11,3 +11,7 @@ For historical small files, call `compact_batches(spark, silver_root, batch_ids,
 ## Search criteria
 
 Both sources derive their search from one term list, `AI_TERMS` in `src/search_criteria.py`, so they describe the same population: Scopus uses `TITLE-ABS-KEY(...)` and OpenAlex uses `title_and_abstract.search:(...)`. Run `python -m src.search_criteria` to print both expressions. `SCOPUS_QUERY` is still taken from the environment and is never invented; `OPENALEX_FILTER` overrides the shared definition, and `none` disables it. OpenAlex batch state is scoped to the filter, so changing it starts a fresh initial ingestion; data ingested without a filter stays in Bronze and Silver until it is purged. Document type and language are not filtered at ingestion; they belong to the Silver filtering step.
+
+## Parquet layers
+
+Bronze pages are Parquet (`page-NNNNNN.parquet`: `batch_id`, `page_number`, `record_index`, `record_json`), rejected rows are Parquet, and Silver is Parquet. Only control files (`batch_metadata/*.json`, `_processing/*.json`, compaction manifests) stay JSON. Spark still reads JSON pages written before this change, including a batch that mixes both formats.

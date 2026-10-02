@@ -16,7 +16,7 @@ La partición anual restringe cada consulta mediante `PUBYEAR`, para separar los
 
 ## Ciclo de los lotes
 
-Las respuestas originales se escriben por páginas JSON bajo `bronze/openalex/<batch-id>/` o `bronze/scopus/<batch-id>/`. El estado compartido se guarda bajo `bronze/batch_metadata`; el almacén coordina los lotes y bloqueos. Spark toma únicamente lotes completos con `page_count > 0`.
+Las respuestas originales se escriben por páginas Parquet (una fila por registro, con su JSON original en `record_json`) bajo `bronze/openalex/<batch-id>/` o `bronze/scopus/<batch-id>/`. El estado compartido se guarda bajo `bronze/batch_metadata`; el almacén coordina los lotes y bloqueos. Spark toma únicamente lotes completos con `page_count > 0`.
 
 La ingesta puede reanudar lotes en curso. OpenAlex recorre páginas mediante cursor; Scopus pagina mediante offset. Los metadatos se actualizan de forma atómica y no deben contener el token. Esto permite distinguir datos recibidos de lotes listos para procesar sin borrar la evidencia Bronze.
 

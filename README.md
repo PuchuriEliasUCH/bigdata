@@ -55,7 +55,7 @@ OpenAlex Works API + OPENALEX_TOKEN
 src/openalex_ingest.py
               |
               v
-Bronze: data/bronze/openalex/<batch-id>/page-*.json
+Bronze: data/bronze/openalex/<batch-id>/page-*.parquet
         data/bronze/batch_metadata/<batch-id>.json
               |
               v

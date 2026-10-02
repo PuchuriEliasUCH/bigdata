@@ -84,7 +84,7 @@ def test_initial_ingestion_paginates_and_persists_raw_pages_and_metadata(tmp_pat
     metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "completed_target"
     assert metadata["record_count"] == 450
-    assert len(list((tmp_path / "bronze" / "openalex" / summary.batch_id).glob("page-*.json"))) == 3
+    assert len(list((tmp_path / "bronze" / "openalex" / summary.batch_id).glob("page-*.parquet"))) == 3
     assert "unit-test-token" not in summary.metadata_path.read_text(encoding="utf-8")
 
 
@@ -253,7 +253,7 @@ def test_page_written_but_checkpoint_failed_is_replayed_without_duplicates(tmp_p
     monkeypatch.setattr(BatchStateStore, "write_metadata", original)
     summary = run_ingestion(bronze, client=OpenAlexClient("secret", session=CursorSession({"*": page(0, 2, "next")})), initial_target_records=2)
     assert summary.records == 2
-    assert len(list((bronze / "openalex" / summary.batch_id).glob("page-*.json"))) == 1
+    assert len(list((bronze / "openalex" / summary.batch_id).glob("page-*.parquet"))) == 1
 
 
 def test_nonempty_page_without_next_cursor_is_not_proven_exhausted(tmp_path):
