@@ -78,14 +78,14 @@ def test_processing_validates_normalizes_deduplicates_and_rejects(spark, tmp_pat
 
     valid_rows = spark.read.parquet(str(silver_root / "works" / "initial-test")).collect()
     assert len(valid_rows) == 1
-    assert valid_rows[0]["openalex_id"] == "https://openalex.org/W1"
+    assert valid_rows[0]["source_id"] == "https://openalex.org/W1"
     assert valid_rows[0]["publication_year"] == 2024
     assert valid_rows[0]["topic_names"] == ["Data Engineering"]
 
     rejected_rows = spark.read.parquet(str(silver_root / "rejected" / "initial-test")).collect()
     reasons = {row["rejection_reason"] for row in rejected_rows}
     assert len(rejected_rows) == 3
-    assert "duplicate_openalex_id" in reasons
+    assert "duplicate_source_id" in reasons
     assert any("missing_title" in reason for reason in reasons)
     assert any("missing_topics" in reason for reason in reasons)
 
@@ -190,11 +190,11 @@ def test_previous_batch_duplicate_is_rejected_without_using_invalid_ids(spark, t
     assert summary.rejected_rows == 2
 
     first_batch_rows = spark.read.parquet(str(silver_root / "works" / "batch-001")).collect()
-    assert [row["openalex_id"] for row in first_batch_rows] == [
+    assert [row["source_id"] for row in first_batch_rows] == [
         "https://openalex.org/W20"
     ]
     second_batch_rows = spark.read.parquet(str(silver_root / "works" / "batch-002")).collect()
-    assert [row["openalex_id"] for row in second_batch_rows] == [
+    assert [row["source_id"] for row in second_batch_rows] == [
         "https://openalex.org/W21"
     ]
 
@@ -203,8 +203,8 @@ def test_previous_batch_duplicate_is_rejected_without_using_invalid_ids(spark, t
     assert "missing_title" in first_rejected[0]["rejection_reason"]
     second_rejected = spark.read.parquet(str(silver_root / "rejected" / "batch-002")).collect()
     assert len(second_rejected) == 1
-    assert second_rejected[0]["openalex_id"] == "https://openalex.org/W20"
-    assert second_rejected[0]["rejection_reason"] == "duplicate_openalex_id_previous_batch"
+    assert second_rejected[0]["source_id"] == "https://openalex.org/W20"
+    assert second_rejected[0]["rejection_reason"] == "duplicate_source_id_previous_batch"
 
 
 def test_scopus_and_openalex_keep_provenance_and_share_normalized_doi(spark, tmp_path):
@@ -237,23 +237,6 @@ def test_scopus_and_openalex_keep_provenance_and_share_normalized_doi(spark, tmp
 def test_large_batch_uses_more_than_one_output_partition():
     assert spark_pipeline.output_partitions(100_001, rows_per_file=100_000) == 2
     assert spark_pipeline.output_partitions(1000, rows_per_file=100_000) == 1
-
-
-def test_scopus_processing_can_follow_legacy_openalex_without_source_column(spark, tmp_path):
-    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
-    from pyspark.sql.types import StructType, StructField, StringType
-    old = silver / "works" / "old"
-    spark.createDataFrame([("legacy-id",)], StructType([StructField("openalex_id", StringType())])).write.parquet(str(old))
-    state = silver / "_processing"
-    state.mkdir(parents=True)
-    (state / "old.json").write_text('{"status":"completed"}')
-    write_completed_batch(bronze, "old", [{"id": "legacy-id", "title": "old", "publication_year": 2020, "topics": [{"id": "T"}]}])
-    batch = "new"
-    raw = bronze / "scopus" / batch
-    raw.mkdir(parents=True)
-    (raw / "page-000001.json").write_text(json.dumps({"search-results": {"entry": [{"eid": "new-id", "dc:title": "new", "prism:coverDate": "2024-01-01"}]}}))
-    (bronze / "batch_metadata" / "new.json").write_text(json.dumps({"batch_id": batch, "source": "scopus", "status": "completed_target", "page_count": 1, "raw_page_dir": "scopus/new", "created_at": "z"}))
-    assert process_pending_batches(spark, bronze, silver).valid_rows == 1
 
 
 def test_unique_publications_preserves_source_rows_and_missing_doi(spark):

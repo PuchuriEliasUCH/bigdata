@@ -32,9 +32,8 @@ Los originales permanecen en Bronze. No se debe confundir el flujo de filtrado c
 | Campo | Significado |
 |---|---|
 | `batch_id` | Lote de origen |
-| `openalex_id` | Identificador de trabajo: para Scopus se llena con el `eid` de Scopus, no con un ID OpenAlex nativo |
 | `source` | `openalex` o `scopus` |
-| `source_id` | Actualmente copia `openalex_id` |
+| `source_id` | Identificador del trabajo en su fuente: el ID de OpenAlex o el `eid` de Scopus |
 | `title` | Título |
 | `publication_year`, `publication_date` | Año y fecha; si falta el año, puede derivarse de los primeros cuatro caracteres de la fecha |
 | `topic_ids`, `topic_names`, `topic_count` | Temas disponibles; Scopus queda sin temas mapeados |
@@ -42,7 +41,7 @@ Los originales permanecen en Bronze. No se debe confundir el flujo de filtrado c
 | `cited_by_count`, `is_oa`, `source_name` | Citaciones, acceso abierto y nombre de fuente; `is_oa` es nulo para Scopus |
 | `processed_at` | Momento de procesamiento |
 
-Los nombres `openalex_id` y `source_id` son comunes por compatibilidad del esquema y pueden inducir a error en filas Scopus. No constituyen una clave de enlace entre bases ni realizan resolución de entidades.
+`source_id` solo identifica un trabajo dentro de su fuente: no es una clave de enlace entre bases ni resuelve entidades. Los motivos de rechazo usan `source_id` (`missing_source_id`, `duplicate_source_id`, `duplicate_source_id_previous_batch`).
 
 ## Compactación opcional
 

@@ -60,7 +60,7 @@ def _silver_batch(spark, bronze, silver, batch, source, year, rows=2, rejected=0
         {"batch_id": batch, "source": source, key: base, "status": "completed_target", "page_count": 1, "created_at": batch}))
     spark.createDataFrame([(source, f"{batch}-{i}", year) for i in range(rows)], _DDL).write.parquet(str(silver / "works" / batch))
     if rejected:
-        spark.createDataFrame([(batch, f"r{i}", "missing_title") for i in range(rejected)], "batch_id string, openalex_id string, rejection_reason string").write.parquet(str(silver / "rejected" / batch))
+        spark.createDataFrame([(batch, f"r{i}", "missing_title") for i in range(rejected)], "batch_id string, source_id string, rejection_reason string").write.parquet(str(silver / "rejected" / batch))
     (silver / "_processing").mkdir(parents=True, exist_ok=True)
     (silver / "_processing" / f"{batch}.json").write_text(json.dumps({"batch_id": batch, "status": state}))
 

@@ -63,7 +63,7 @@ RAW_SCHEMA = StructType(
         StructField("batch_id", StringType(), False),
         StructField("record_order", IntegerType(), False),
         StructField("record_json", StringType(), False),
-        StructField("openalex_id", StringType(), True),
+        StructField("source_id", StringType(), True),
         StructField("title", StringType(), True),
         StructField("publication_year", IntegerType(), True),
         StructField("publication_date", StringType(), True),
@@ -201,7 +201,7 @@ def _load_batch_dataframe(
             F.lit(batch_id).alias("batch_id"),
             "record_order",
             F.col("_record_json").alias("record_json"),
-            field("eid").alias("openalex_id"),
+            field("eid").alias("source_id"),
             field("dc:title").alias("title"),
             F.regexp_extract(date, r"^(\d{4})", 1).cast("int").alias("publication_year"),
             date.alias("publication_date"),
@@ -241,7 +241,7 @@ def _load_batch_dataframe(
         F.lit(batch_id).alias("batch_id"),
         "record_order",
         F.col("_record_json").alias("record_json"),
-        F.trim(json_value("$.id")).alias("openalex_id"),
+        F.trim(json_value("$.id")).alias("source_id"),
         F.trim(json_value("$.title")).alias("title"),
         F.when(
             publication_year_text.rlike(r"^-?\d+$"),
@@ -268,9 +268,9 @@ def _validation_reason(dataframe: DataFrame, source: str = "openalex") -> DataFr
 
     reasons = F.array(
         F.when(
-            F.col("openalex_id").isNull()
-            | (F.length(F.trim(F.col("openalex_id"))) == 0),
-            F.lit("missing_openalex_id"),
+            F.col("source_id").isNull()
+            | (F.length(F.trim(F.col("source_id"))) == 0),
+            F.lit("missing_source_id"),
         ),
         F.when(
             F.col("title").isNull() | (F.length(F.trim(F.col("title"))) == 0),
@@ -296,7 +296,7 @@ def _rejected_columns(dataframe: DataFrame) -> DataFrame:
     return dataframe.select(
         "batch_id",
         "record_order",
-        "openalex_id",
+        "source_id",
         "record_json",
         "rejection_reason",
     )
@@ -308,9 +308,8 @@ def _silver_columns(dataframe: DataFrame, processed_at: str, source: str = "open
     ).otherwise(F.regexp_extract(F.col("publication_date"), r"^(\d{4})", 1).cast("int"))
     return dataframe.select(
         "batch_id",
-        "openalex_id",
         F.lit(source).alias("source"),
-        F.col("openalex_id").alias("source_id"),
+        "source_id",
         "title",
         publication_year.alias("publication_year"),
         "publication_date",
@@ -385,17 +384,17 @@ def _process_one_batch(
 
     # Keep the first occurrence deterministic and make later duplicates visible
     # in Silver rejected rather than silently losing audit evidence.
-    first_record_orders = valid.groupBy("openalex_id").agg(
+    first_record_orders = valid.groupBy("source_id").agg(
         F.min("record_order").alias("_first_record_order")
     )
     duplicates = (
-        valid.join(first_record_orders, on="openalex_id")
+        valid.join(first_record_orders, on="source_id")
         .filter(F.col("record_order") != F.col("_first_record_order"))
         .drop("_first_record_order")
-        .withColumn("rejection_reason", F.lit("duplicate_openalex_id"))
+        .withColumn("rejection_reason", F.lit("duplicate_source_id"))
     )
     accepted = (
-        valid.join(first_record_orders, on="openalex_id")
+        valid.join(first_record_orders, on="source_id")
         .filter(F.col("record_order") == F.col("_first_record_order"))
         .drop("_first_record_order")
     )
@@ -409,18 +408,18 @@ def _process_one_batch(
                 previous = previous.where(F.col("source") == source)
             elif source != "openalex":
                 continue
-            same_source_ids.append(previous.select("openalex_id"))
+            same_source_ids.append(previous.select("source_id"))
         if same_source_ids:
             previous_ids = same_source_ids[0]
             for other in same_source_ids[1:]:
                 previous_ids = previous_ids.unionByName(other)
-            previous_ids = previous_ids.where(F.col("openalex_id").isNotNull()).distinct()
+            previous_ids = previous_ids.where(F.col("source_id").isNotNull()).distinct()
             cross_batch_duplicates = accepted.join(
-                previous_ids, on="openalex_id", how="left_semi"
+                previous_ids, on="source_id", how="left_semi"
             ).withColumn(
-                "rejection_reason", F.lit("duplicate_openalex_id_previous_batch")
+                "rejection_reason", F.lit("duplicate_source_id_previous_batch")
             )
-            accepted = accepted.join(previous_ids, on="openalex_id", how="left_anti")
+            accepted = accepted.join(previous_ids, on="source_id", how="left_anti")
 
     rejected = _rejected_columns(invalid).unionByName(_rejected_columns(duplicates))
     if cross_batch_duplicates is not None:
