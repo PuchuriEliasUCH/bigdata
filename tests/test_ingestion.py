@@ -54,6 +54,8 @@ class ScopusYears:
         start, count = params["start"], params["count"]
         total = self.volumes[year]
         entries = [{"eid": f"{year}-{i}"} for i in range(start, min(total, start + count))]
+        if not entries and total == 0:
+            entries = [{"@_fa": "true", "error": "Result set was empty"}]
         return FakeResponse({"search-results": {"opensearch:totalResults": str(total), "entry": entries}})
 
 

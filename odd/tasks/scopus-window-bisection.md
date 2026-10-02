@@ -45,6 +45,8 @@ Known gaps: Silver drops abstract, authors, institutions, countries, keywords, l
 
 Engram: `mem_save` and `mem_session_start` failed at 2026-10-02 with "Claude host session registration could not be confirmed"; this section is the fallback record until Engram is reconnected.
 
+Real bounded read test (2024-2025, target 200, temp dir inside the container): pipeline_complete, 398 valid + 2 rejected Silver rows, quotas respected. It exposed a defect: empty Scopus windows were stored as one phantom record (record_count 1) and consumed quota; fixed in the commit after 24c4f04 (97 tests pass). Open item: Silver creates one folder per Scopus window (6 for 200 records), so compaction or batch merging is needed before the 100k load.
+
 ## Next step
 1. Real bounded read test (2024-2025, INGEST_INITIAL_TARGET=200, temporary folder), authorized by the user.
 2. Design the Silver schema (enrich OpenAlex fields) and decide the role of Scopus.

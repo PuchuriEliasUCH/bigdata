@@ -221,6 +221,9 @@ def test_year_orchestrator_keeps_paging_year_before_advancing(tmp_path):
     assert len(summaries) == 3
 
 
+EMPTY_RESULT_ENTRY = {"@_fa": "true", "error": "Result set was empty"}
+
+
 class CorpusSession:
     """Fake Scopus API that evaluates PUBYEAR and ORIG-LOAD-DATE AFT/BEF predicates."""
 
@@ -241,6 +244,9 @@ class CorpusSession:
             and (not before or loaded < int(before.group(1)))
         ]
         start, count = params["start"], params["count"]
+        if not rows:
+            # Scopus answers an empty result set with one error entry instead of no entries.
+            return Response([EMPTY_RESULT_ENTRY], 0)
         return Response([{"eid": eid} for eid in rows[start:start + count]], len(rows))
 
 
@@ -367,3 +373,31 @@ def test_year_quota_run_is_idempotent_before_incremental_budget_is_granted(tmp_p
     session = CorpusSession(_yearly_corpus())
     run_scopus_years(tmp_path, **_yearly_options(session))
     assert len(ingested_eids(tmp_path)) == 5
+
+
+def test_empty_result_set_error_entry_is_not_stored_as_a_record(tmp_path):
+    session = Session([Response([EMPTY_RESULT_ENTRY], 0)])
+    result = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), query="TITLE(test)", target_records=5)
+    assert result.status == "completed_exhausted"
+    assert result.records == 0
+    assert not list((tmp_path / "scopus").glob("*/page-*"))
+    assert json.loads(result.metadata_path.read_text())["page_count"] == 0
+
+
+def test_zero_total_never_yields_records_even_if_entries_are_present(tmp_path):
+    session = Session([Response([{"eid": "ghost"}], 0)])
+    result = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), query="TITLE(test)", target_records=5)
+    assert result.records == 0
+    assert ingested_eids(tmp_path) == []
+
+
+def test_empty_windows_do_not_consume_the_year_quota(tmp_path):
+    corpus = [(f"a{i}", 2020, 20200101 + i) for i in range(6)]
+    session = CorpusSession(corpus)
+    run_scopus_years(
+        tmp_path, query="TITLE(test)", first_year=2020, last_year=2020,
+        client=ScopusClient("secret", session=session), result_window=3, page_size=3,
+        requests_per_second=0, ceiling=date(2021, 6, 1), year_quotas={2020: 6}, year_totals={2020: 6},
+        initial_target_records=6,
+    )
+    assert sorted(ingested_eids(tmp_path)) == sorted(eid for eid, _, _ in corpus)

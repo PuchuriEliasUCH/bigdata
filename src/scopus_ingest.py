@@ -193,6 +193,10 @@ def run_scopus_ingestion(
                 total = int(search["opensearch:totalResults"])
                 if not isinstance(entries, list) or len(entries) > count or total < 0:
                     raise ValueError("Invalid Scopus page")
+                # Scopus reports an empty result set as one error entry, so a zero total
+                # means no records and error entries are never stored as records.
+                entries = [] if total == 0 else [entry for entry in entries if "error" not in entry]
+                search["entry"] = entries
             except (requests.Timeout, requests.ConnectionError):
                 metadata["status"] = "transient_error"
                 break
