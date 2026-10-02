@@ -328,3 +328,42 @@ def test_incremental_runs_continue_after_initial_target_until_results_end(tmp_pa
     calls = len(session.calls)
     run_scopus_years(tmp_path, initial_target_records=2, target_records=2, **options)
     assert len(session.calls) == calls
+
+
+def _yearly_corpus():
+    return [(f"a{i}", 2020, 20200101 + i) for i in range(10)] + [(f"b{i}", 2021, 20210101 + i) for i in range(10)]
+
+
+def _count_by_year(root):
+    eids = ingested_eids(root)
+    return len([e for e in eids if e.startswith("a")]), len([e for e in eids if e.startswith("b")])
+
+
+def _yearly_options(session):
+    return dict(
+        query="TITLE(test)", first_year=2020, last_year=2021,
+        client=ScopusClient("secret", session=session), page_size=1, requests_per_second=0,
+        ceiling=date(2021, 6, 1), initial_target_records=5,
+        year_quotas={2020: 3, 2021: 2}, year_totals={2020: 10, 2021: 10},
+    )
+
+
+def test_each_year_stops_at_its_own_initial_quota(tmp_path):
+    run_scopus_years(tmp_path, **_yearly_options(CorpusSession(_yearly_corpus())))
+    assert _count_by_year(tmp_path) == (3, 2)
+
+
+def test_incremental_runs_serve_the_least_filled_year_first(tmp_path):
+    session = CorpusSession(_yearly_corpus())
+    options = _yearly_options(session)
+    run_scopus_years(tmp_path, **options)
+    run_scopus_years(tmp_path, target_records=2, **options)
+    assert _count_by_year(tmp_path) == (3, 4)  # 2021 is 20% full, 2020 is 30% full
+    run_scopus_years(tmp_path, target_records=2, **options)
+    assert _count_by_year(tmp_path) == (5, 4)  # now 2020 (30%) is behind 2021 (40%)
+
+
+def test_year_quota_run_is_idempotent_before_incremental_budget_is_granted(tmp_path):
+    session = CorpusSession(_yearly_corpus())
+    run_scopus_years(tmp_path, **_yearly_options(session))
+    assert len(ingested_eids(tmp_path)) == 5

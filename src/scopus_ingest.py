@@ -99,6 +99,7 @@ def run_scopus_ingestion(
     requests_per_second: float = 2.0,
     max_retries: int = 2,
     split_oversized: bool = False,
+    base_query: str | None = None,
 ) -> ScopusSummary:
     if not query or (target_records is not None and target_records < 1) or initial_target_records < 1 or not 1 <= page_size <= 200 or result_window < 1 or max_retries < 0:
         raise IngestionError("Invalid Scopus query or pagination settings")
@@ -120,7 +121,7 @@ def run_scopus_ingestion(
             "batch_id": _batch_id("scopus"), "source": "scopus", "query": query, "mode": mode,
             "status": "running", "stop_reason": None, "record_count": 0,
             "page_count": 0, "next_offset": previous["next_offset"] if previous else 0, "target_records": configured_target,
-            "raw_page_dir": "", "raw_page_files": [], "created_at": utc_now(),
+            "raw_page_dir": "", "raw_page_files": [], "base_query": base_query or query, "created_at": utc_now(),
         }
         metadata["raw_page_dir"] = f"scopus/{metadata['batch_id']}"
         store.write_metadata(metadata)
@@ -238,36 +239,56 @@ def run_scopus_years(
     target_records: int | None = None,
     split_oversized: bool = True,
     ceiling: date = CEILING_LOAD_DATE,
+    year_quotas: dict[int, int] | None = None,
+    year_totals: dict[int, int] | None = None,
     **options: Any,
 ) -> list[ScopusSummary]:
     """Ingest a query as disjoint partitions that each fit the result window.
 
     Partitions are years (when a range is given) and, for any partition above the
-    window, recursive load-date halves that cover all history. The first runs fill
-    the initial target; later runs spend an incremental budget until results end.
+    window, recursive load-date halves that cover all history. With year_quotas each
+    year fills its own initial quota; afterwards runs spend an incremental budget on
+    the least filled year first, so every year grows in proportion to its volume.
     """
     if (first_year is None) != (last_year is None):
         raise ValueError("first_year and last_year must be set together")
     store = BatchStateStore(Path(bronze_root), "scopus")
     api = client or ScopusClient.from_environment()
-    base_queries = split_year_range(query, first_year, last_year) if first_year is not None else [query]
+    if first_year is None:
+        years: list[tuple[int | None, str]] = [(None, query)]
+    else:
+        years = list(zip(range(first_year, last_year + 1), split_year_range(query, first_year, last_year)))
     summaries: list[ScopusSummary] = []
+    terminal = {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}
 
     def scopus_history() -> list[dict[str, Any]]:
         return [record for record in store.list_metadata() if record.get("source") == "scopus"]
 
-    def initial_total(history: list[dict[str, Any]]) -> int:
-        return sum(int(record.get("record_count", 0)) for record in history if record.get("mode") == "initial")
+    def scoped(history: list[dict[str, Any]], base_query: str, modes: tuple[str, ...]) -> int:
+        """Records already taken for one year, or for everything when there are no quotas."""
+        return sum(
+            int(record.get("record_count", 0)) for record in history
+            if record.get("mode") in modes and (year_quotas is None or record.get("base_query") == base_query)
+        )
+
+    def quota_for(year: int | None) -> int:
+        return initial_target_records if year_quotas is None else year_quotas.get(year, 0)
+
+    def fill_ratio(year: int | None, base_query: str, history: list[dict[str, Any]]) -> float:
+        total = (year_totals or {}).get(year) or 0
+        return scoped(history, base_query, ("initial", "incremental")) / total if total else 1.0
 
     start_history = scopus_history()
-    incremental_run = initial_total(start_history) >= initial_target_records and not any(
-        record.get("mode") == "initial" and record.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}
-        for record in start_history
+    initial_done = all(scoped(start_history, base, ("initial",)) >= quota_for(year) for year, base in years)
+    incremental_run = initial_done and not any(
+        record.get("mode") == "initial" and record.get("status") not in terminal for record in start_history
     )
     budget = (target_records or DEFAULT_INCREMENTAL_LIMIT) if incremental_run else None
+    if incremental_run and year_quotas is not None:
+        years.sort(key=lambda item: fill_ratio(item[0], item[1], start_history))
 
-    def advance(partition_query: str, can_split: bool) -> str:
-        """Return done, split or stop for one partition."""
+    def advance(partition_query: str, can_split: bool, base_query: str, quota: int) -> str:
+        """Return done, split, quota or stop for one partition."""
         nonlocal budget
         while True:
             history = scopus_history()
@@ -277,7 +298,7 @@ def run_scopus_years(
             if any(record.get("status") == "result_window_reached" for record in mine):
                 return "done"
             existing = [record for record in mine if record.get("status") in {"completed_target", "completed_exhausted"}]
-            in_progress = [record for record in mine if record.get("mode") == "initial" and record.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}]
+            in_progress = [record for record in mine if record.get("mode") == "initial" and record.get("status") not in terminal]
             last = max(existing, key=lambda record: record.get("created_at", ""), default=None)
             if last and (last["status"] == "completed_exhausted" or last.get("next_offset", 0) >= last.get("total_results", float("inf"))):
                 if not summaries or summaries[-1].batch_id != last["batch_id"]:
@@ -288,14 +309,14 @@ def run_scopus_years(
                     return "stop"
                 batch_target, batch_initial = budget, initial_target_records
             else:
-                remaining_initial = max(0, initial_target_records - initial_total(history))
+                remaining_initial = max(0, quota - scoped(history, base_query, ("initial",)))
                 if remaining_initial == 0 and not in_progress:
-                    return "stop"
+                    return "stop" if year_quotas is None else "quota"
                 batch_target = target_records
-                batch_initial = initial_target_records if in_progress else remaining_initial
+                batch_initial = quota if in_progress else remaining_initial
             summary = run_scopus_ingestion(bronze_root, query=partition_query, client=api,
                                            initial_target_records=batch_initial, target_records=batch_target,
-                                           split_oversized=can_split, **options)
+                                           split_oversized=can_split, base_query=base_query, **options)
             if summary.status == "oversized":
                 return "split"
             summaries.append(summary)
@@ -308,17 +329,19 @@ def run_scopus_years(
                 return "done"
             if summary.status != "completed_target":
                 return "stop"
-            if budget is None and initial_total(scopus_history()) >= initial_target_records:
-                return "stop"
+            if budget is None and scoped(scopus_history(), base_query, ("initial",)) >= quota:
+                return "stop" if year_quotas is None else "quota"
 
-    for base_query in base_queries:
+    for year, base_query in years:
         pending: list[Window] = [(None, None)]
         while pending:
             low, high = pending.pop()
             halves = split_window(low, high, ceiling) if split_oversized else []
-            outcome = advance(window_query(base_query, low, high), can_split=bool(halves))
+            outcome = advance(window_query(base_query, low, high), bool(halves), base_query, quota_for(year))
             if outcome == "stop":
                 return summaries
+            if outcome == "quota":
+                break
             if outcome == "split":
                 pending.extend(reversed(halves))
     return summaries
