@@ -33,3 +33,7 @@ OpenAlex reads its credits once per batch instead of before every page, which ha
 ## Scopus request pacing
 
 Elsevier documents 20,000 requests per week and 9 requests per second per key, 25 results per request for this key (a request for 200 was rejected with HTTP 400 "Exceeds the maximum number allowed for the service level", also with `view=STANDARD`), and a 5,000-result depth without cursor pagination. The client spaces requests at `SCOPUS_REQUESTS_PER_SECOND` (default 5), counting the interval from the start of the previous request, so a slow response does not add a further wait. The weekly quota resets at the time given by `X-RateLimit-Reset`.
+
+## Silver schema version and automatic rebuild
+
+`SILVER_SCHEMA_VERSION` (in `src/spark_pipeline.py`) is stamped in `silver/_schema_version.json`. When the code's version differs from the stamp, or the stamp is missing, the next run discards the derived Silver (`works`, `rejected`, `_processing`, `_compact`) and reprocesses every Bronze batch, with no manual step. Silver is derived data and Bronze keeps the original records, but nothing is deleted unless every Silver batch still has its Bronze metadata; otherwise the run stops with an error and Silver stays untouched. Spark also has its own time budget (`SILVER_TIME_BUDGET_SECONDS`, default 25 s): no new batch starts after the deadline, at least one batch is always processed, and a rebuild finishes across several runs. The run report shows `silver_schema_version`, `silver_rebuilt` and `silver_pending_batches`.

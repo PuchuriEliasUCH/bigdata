@@ -25,6 +25,8 @@ DEFAULT_TIME_BUDGET_SECONDS = 80.0
 DEFAULT_SCOPUS_SHARE = 0.6
 # Elsevier allows 9 requests per second per key; stay well below it.
 DEFAULT_SCOPUS_REQUESTS_PER_SECOND = 5.0
+# Spark starts no new batch after this many seconds; a rebuild then continues next run.
+DEFAULT_SILVER_TIME_BUDGET_SECONDS = 25.0
 
 
 def _overall(statuses: list[str], settled: set[str]) -> str | None:
@@ -76,7 +78,8 @@ def main() -> None:
         .getOrCreate()
     )
     try:
-        processing = process_pending_batches(spark, bronze_root, silver_root)
+        silver_budget = float(os.environ.get("SILVER_TIME_BUDGET_SECONDS") or DEFAULT_SILVER_TIME_BUDGET_SECONDS)
+        processing = process_pending_batches(spark, bronze_root, silver_root, deadline=time.monotonic() + silver_budget)
         # Small batches pile up (one per Scopus window, one per OpenAlex increment);
         # compaction only acts once a source and year have enough of them.
         compaction = compact_pending(
@@ -105,6 +108,9 @@ def main() -> None:
                 "scopus_status": scopus_status,
                 "processed_batches": processing.processed_batches,
                 "skipped_batches": processing.skipped_batches,
+                "silver_schema_version": processing.schema_version,
+                "silver_rebuilt": processing.rebuilt,
+                "silver_pending_batches": processing.pending_batches,
                 "compacted_groups": list(compaction.groups),
                 "compaction_skipped": list(compaction.skipped),
                 "valid_rows": processing.valid_rows,

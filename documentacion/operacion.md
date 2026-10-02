@@ -16,6 +16,7 @@ Use las variables de entorno para configurar rutas, credenciales y selección de
 | `INGEST_TIME_BUDGET_SECONDS` | Tiempo total de ingesta por corrida (predeterminado 80 s de los 120 s del ciclo) |
 | `INGEST_SCOPUS_SHARE` | Parte de ese tiempo para Scopus, la fuente más lenta (predeterminado 0,6); el resto es de OpenAlex |
 | `SCOPUS_REQUESTS_PER_SECOND` | Solicitudes por segundo a Scopus (predeterminado 5; Elsevier permite 9 por key) |
+| `SILVER_TIME_BUDGET_SECONDS` | Después de este tiempo Spark no inicia lotes nuevos en la corrida (predeterminado 25 s); siempre procesa al menos uno |
 | `INCREMENTAL_LIMIT` | Tope de seguridad de registros por corrida en la fase incremental (predeterminado 6 000) |
 | `BRONZE_PATH` | `/data/bronze` en Compose |
 | `SILVER_PATH` | `/data/silver` en Compose |

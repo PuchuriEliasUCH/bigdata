@@ -6,6 +6,7 @@ import json
 import math
 import time
 import os
+import shutil
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,6 +28,10 @@ from pyspark.sql.types import (
 )
 
 
+# Bump when Silver's columns or rules change: the next run rebuilds Silver from Bronze.
+SILVER_SCHEMA_VERSION = 2
+
+
 class ProcessingError(RuntimeError):
     """Raised when a Bronze batch cannot be processed safely."""
 
@@ -39,6 +44,9 @@ class ProcessingSummary:
     skipped_batches: tuple[str, ...]
     valid_rows: int
     rejected_rows: int
+    rebuilt: bool = False
+    pending_batches: int = 0
+    schema_version: int = SILVER_SCHEMA_VERSION
 
 
 def output_partitions(rows: int, rows_per_file: int = 100_000) -> int:
@@ -438,12 +446,51 @@ def _process_one_batch(
     return accepted.count(), rejected.count()
 
 
+def _ensure_schema_version(bronze_path: Path, silver_path: Path) -> bool:
+    """Rebuild derived Silver when it was written with another schema version.
+
+    Silver is derived from Bronze, so an older schema is discarded and reprocessed
+    without manual steps. Nothing is deleted unless every Silver batch still has its
+    Bronze metadata, so a missing source can never turn a rebuild into data loss.
+    """
+    marker = silver_path / "_schema_version.json"
+    try:
+        current = json.loads(marker.read_text(encoding="utf-8")).get("version") if marker.exists() else None
+    except (OSError, ValueError):
+        current = None
+    if current == SILVER_SCHEMA_VERSION:
+        return False
+    derived = [silver_path / name for name in ("works", "rejected", "_processing", "_compact")]
+    has_data = any(path.exists() for path in derived)
+    if has_data:
+        batches: set[str] = set()
+        for folder in ("works", "rejected"):
+            batches.update(path.name for path in (silver_path / folder).glob("*") if path.is_dir())
+        batches.update(path.stem for path in (silver_path / "_processing").glob("*.json"))
+        manifest = silver_path / "_compact" / "manifest.json"
+        if manifest.exists():
+            for entry in json.loads(manifest.read_text(encoding="utf-8")).values():
+                batches.update(entry["batches"])
+        missing = sorted(batch for batch in batches if not (bronze_path / "batch_metadata" / f"{batch}.json").exists())
+        if missing:
+            raise ProcessingError(f"Cannot rebuild Silver: Bronze is missing for {len(missing)} batches")
+        for path in derived:
+            shutil.rmtree(path, ignore_errors=True)
+    _write_json_atomic(marker, {"version": SILVER_SCHEMA_VERSION})
+    return has_data
+
+
 def process_pending_batches(
     spark: SparkSession | None,
     bronze_root: str | Path,
     silver_root: str | Path,
+    deadline: float | None = None,
 ) -> ProcessingSummary:
-    """Process completed Bronze batches once and write Silver/Rejected zones."""
+    """Process completed Bronze batches once and write Silver/Rejected zones.
+
+    After the deadline no new batch is started, but at least one batch is always
+    processed so a rebuild keeps progressing and finishes across several runs.
+    """
 
     bronze_path = Path(bronze_root)
     silver_path = Path(silver_root)
@@ -461,7 +508,9 @@ def process_pending_batches(
     valid_rows = 0
     rejected_rows = 0
     completed_silver_paths: list[Path] = []
+    pending = 0
     with _processing_lock(silver_path):
+        rebuilt = _ensure_schema_version(bronze_path, silver_path)
         for metadata in _completed_metadata(bronze_path):
             batch_id = str(metadata["batch_id"])
             state_path = _processing_state_path(silver_path, batch_id)
@@ -475,6 +524,9 @@ def process_pending_batches(
                     completed_silver_paths.append(silver_path / "works" / batch_id)
                     continue
 
+            if deadline is not None and processed and time.monotonic() >= deadline:
+                pending += 1
+                continue
             _write_json_atomic(
                 state_path,
                 {
@@ -526,4 +578,6 @@ def process_pending_batches(
         skipped_batches=tuple(skipped),
         valid_rows=valid_rows,
         rejected_rows=rejected_rows,
+        rebuilt=rebuilt,
+        pending_batches=pending,
     )

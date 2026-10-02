@@ -13,7 +13,7 @@ def isolated_environment(tmp_path, monkeypatch):
     """Keep container .env values from reaching real APIs and point every zone at tmp_path."""
     for name in ("SCOPUS_QUERY", "SCOPUS_API", "INGEST_FIRST_YEAR", "INGEST_LAST_YEAR",
                  "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES", "INGEST_TIME_BUDGET_SECONDS",
-                 "INGEST_SCOPUS_SHARE", "SCOPUS_REQUESTS_PER_SECOND"):
+                 "INGEST_SCOPUS_SHARE", "SCOPUS_REQUESTS_PER_SECOND", "SILVER_TIME_BUDGET_SECONDS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
@@ -22,7 +22,7 @@ def isolated_environment(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def fake_spark(monkeypatch):
     """Replace Spark so these tests only exercise orchestration."""
-    calls = {"processed": (), "compaction": [], "compacted": ()}
+    calls = {"processed": (), "compaction": [], "compacted": (), "deadline": []}
 
     class Builder:
         def master(self, value): return self
@@ -32,8 +32,9 @@ def fake_spark(monkeypatch):
 
     monkeypatch.setattr(pipeline.SparkSession, "builder", Builder())
     monkeypatch.setattr(pipeline, "compact_pending", lambda spark, bronze, silver, min_batches: calls["compaction"].append((bronze, silver, min_batches)) or CompactionSummary(calls["compacted"], ()))
-    monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver: type(
-        "Result", (), dict(processed_batches=calls["processed"], skipped_batches=(), valid_rows=0, rejected_rows=0))())
+    monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver, deadline=None: calls["deadline"].append(deadline) or type(
+        "Result", (), dict(processed_batches=calls["processed"], skipped_batches=(), valid_rows=0, rejected_rows=0,
+                           rebuilt=False, pending_batches=0, schema_version=2))())
     return calls
 
 
@@ -151,3 +152,22 @@ def test_compaction_threshold_comes_from_the_environment(tmp_path, monkeypatch, 
     monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
     pipeline.main()
     assert fake_spark["compaction"][0][2] == 3
+
+
+def test_silver_gets_a_deadline_from_its_own_time_budget(monkeypatch, fake_spark):
+    import time
+
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
+    pipeline.main()
+    assert 0 < fake_spark["deadline"][0] - time.monotonic() <= 25.5
+    monkeypatch.setenv("SILVER_TIME_BUDGET_SECONDS", "10")
+    pipeline.main()
+    assert 0 < fake_spark["deadline"][1] - time.monotonic() <= 10.5
+
+
+def test_report_includes_the_silver_schema_state(monkeypatch, capsys):
+    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
+    pipeline.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["silver_schema_version"] == 2
+    assert report["silver_rebuilt"] is False and report["silver_pending_batches"] == 0
