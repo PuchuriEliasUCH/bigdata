@@ -26,3 +26,21 @@ def test_plan_is_reused_only_for_the_same_key(tmp_path):
     save_plan(path, {"target": 10}, {"totals": {"2011": 5}, "quotas": {"2011": 5}})
     assert load_plan(path, {"target": 10})["quotas"] == {"2011": 5}
     assert load_plan(path, {"target": 20}) is None
+
+
+def test_year_plan_is_computed_once_and_returned_with_integer_years(tmp_path):
+    from src.quotas import ensure_year_plan
+
+    calls = []
+
+    def totals():
+        calls.append(1)
+        return {2011: 30, 2012: 10}
+
+    path = tmp_path / "plans" / "src.json"
+    first = ensure_year_plan(path, {"target": 8}, totals, 8)
+    second = ensure_year_plan(path, {"target": 8}, totals, 8)
+    assert first == second == ({2011: 30, 2012: 10}, {2011: 6, 2012: 2})
+    assert len(calls) == 1
+    ensure_year_plan(path, {"target": 9}, totals, 9)
+    assert len(calls) == 2

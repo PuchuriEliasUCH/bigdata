@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def proportional_quotas(totals: dict[int, int], target: int) -> dict[int, int]:
@@ -42,3 +42,21 @@ def save_plan(path: Path, key: dict[str, Any], plan: dict[str, Any]) -> None:
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     temporary.write_text(json.dumps({"key": key, "plan": plan}, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def ensure_year_plan(
+    path: Path, key: dict[str, Any], compute_totals: Callable[[], dict[int, int]], target: int
+) -> tuple[dict[int, int], dict[int, int]]:
+    """Return (totals, quotas) per year, computing and saving them only once per key."""
+    plan = load_plan(path, key)
+    if plan is None:
+        totals = compute_totals()
+        plan = {
+            "totals": {str(year): value for year, value in totals.items()},
+            "quotas": {str(year): value for year, value in proportional_quotas(totals, target).items()},
+        }
+        save_plan(path, key, plan)
+    return (
+        {int(year): value for year, value in plan["totals"].items()},
+        {int(year): value for year, value in plan["quotas"].items()},
+    )

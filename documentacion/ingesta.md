@@ -9,10 +9,9 @@ El pipeline puede consultar ambas fuentes, pero no lo hace siempre: OpenAlex se 
 | Configuración | Acción Scopus |
 |---|---|
 | `SCOPUS_QUERY` vacía o ausente | Se omite |
-| Consulta presente y sin el par completo `SCOPUS_FIRST_YEAR` / `SCOPUS_LAST_YEAR` | Consulta completa, dividida en ventanas de fecha de carga si supera 5 000 resultados |
-| Consulta y ambos años presentes | Ingesta particionada por año |
+| `SCOPUS_QUERY` presente | Ingesta particionada por año (`PUBYEAR`) dentro del rango `INGEST_FIRST_YEAR`–`INGEST_LAST_YEAR`; cada año supera los 5 000 resultados se divide en ventanas de fecha de carga |
 
-La partición anual restringe cada consulta mediante `PUBYEAR`, para separar los intervalos solicitados. Configurar solo uno de los años no activa esa modalidad.
+Ambas fuentes comparten el rango de años y la carga inicial. La cuota de cada año es proporcional a su volumen real (método del resto mayor): primero se consulta cuántos trabajos tiene cada año (un `group_by` en OpenAlex y una consulta de un registro por año en Scopus) y el plan se guarda en `bronze/plans/<fuente>.json`, de modo que las corridas siguientes no lo recalculan. Al completar las cuotas, cada corrida incremental atiende primero el año con menor porcentaje completado, así todos crecen en proporción a su volumen hasta agotar resultados o cuota.
 
 ## Ciclo de los lotes
 

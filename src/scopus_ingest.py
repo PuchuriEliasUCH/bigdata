@@ -228,6 +228,20 @@ def run_scopus_ingestion(
         return ScopusSummary(metadata["batch_id"], metadata["status"], metadata["record_count"], path)
 
 
+def scopus_year_totals(client: ScopusClient, query: str, first_year: int, last_year: int) -> dict[int, int]:
+    """Volume per publication year, from one single-record request per year."""
+    totals = {}
+    for year, year_query in zip(range(first_year, last_year + 1), split_year_range(query, first_year, last_year)):
+        response = client.fetch_page(year_query, 0, 1)
+        if response.status_code >= 400:
+            raise IngestionError(f"Scopus year count failed (HTTP {response.status_code})")
+        try:
+            totals[year] = int(response.json()["search-results"]["opensearch:totalResults"])
+        except (ValueError, KeyError, TypeError):
+            raise IngestionError("Scopus year count returned an invalid response") from None
+    return totals
+
+
 def run_scopus_years(
     bronze_root: str | Path,
     *,
@@ -241,6 +255,7 @@ def run_scopus_years(
     ceiling: date = CEILING_LOAD_DATE,
     year_quotas: dict[int, int] | None = None,
     year_totals: dict[int, int] | None = None,
+    incremental_limit: int | None = None,
     **options: Any,
 ) -> list[ScopusSummary]:
     """Ingest a query as disjoint partitions that each fit the result window.
@@ -283,7 +298,7 @@ def run_scopus_years(
     incremental_run = initial_done and not any(
         record.get("mode") == "initial" and record.get("status") not in terminal for record in start_history
     )
-    budget = (target_records or DEFAULT_INCREMENTAL_LIMIT) if incremental_run else None
+    budget = (incremental_limit or target_records or DEFAULT_INCREMENTAL_LIMIT) if incremental_run else None
     if incremental_run and year_quotas is not None:
         years.sort(key=lambda item: fill_ratio(item[0], item[1], start_history))
 

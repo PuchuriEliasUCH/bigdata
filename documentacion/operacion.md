@@ -11,7 +11,9 @@ Use las variables de entorno para configurar rutas, credenciales y selección de
 | `OPENALEX_FILTER` | Opcional. Si no se define, OpenAlex usa la definición de IA de `src/search_criteria.py`; `none` desactiva el filtro |
 | `SCOPUS_API` | API key de Scopus |
 | `SCOPUS_QUERY` | Consulta que habilita Scopus; vacía significa omitirla |
-| `SCOPUS_FIRST_YEAR`, `SCOPUS_LAST_YEAR` | Ambos habilitan partición anual de Scopus |
+| `INGEST_FIRST_YEAR`, `INGEST_LAST_YEAR` | Rango de años de ambas fuentes (predeterminado 2011 hasta el año actual) |
+| `INGEST_INITIAL_TARGET` | Registros de la carga inicial por fuente, repartidos por año (predeterminado 100 000) |
+| `INCREMENTAL_LIMIT` | Registros por corrida en la fase incremental (predeterminado 1 000) |
 | `BRONZE_PATH` | `/data/bronze` en Compose |
 | `SILVER_PATH` | `/data/silver` en Compose |
 | `SPARK_MASTER` | `local[*]` si no se configura |

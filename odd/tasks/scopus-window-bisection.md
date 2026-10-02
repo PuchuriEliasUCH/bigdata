@@ -20,6 +20,11 @@ Complete massive Scopus ingestion (100,000 initial records, then minute-by-minut
 - [x] SWB-2 Search criteria (70 tests passed): shared `src/search_criteria.py`, OpenAlex filter scoped state. Scopus terms kept unchanged (noisy AI/IA/robotics left for user decision); OpenAlex `title_and_abstract.search` syntax not yet verified against the real API.
 - [x] SWB-3 Parquet end to end (Task B). Done: Bronze pages + rejected as Parquet, legacy JSON still readable (74 tests passed). Gold layer done (`src/gold.py`, wired in run_pipeline; 82 tests passed).
 
+- [x] SWB-4 (101 tests passed) Year-stratified ingestion 2011..current for both sources: proportional initial quota per year (100k), fill-ratio ordered incremental toward >=1M records, per-year OpenAlex lineage, INCREMENTAL_LIMIT env. Silver filtering is out of scope (it will change).
+  - [x] 4a quotas + Scopus per-year quotas
+  - [x] 4b OpenAlex per-year
+  - [x] 4c run_pipeline wiring + docs
+
 ## Acceptance
 - A run over a year with >5,000 hits ingests every partition (mocked client) and records per-partition `total_results`/`status`.
 - Re-running does not loop on a capped batch.
