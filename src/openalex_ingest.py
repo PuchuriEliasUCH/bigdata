@@ -72,9 +72,11 @@ class OpenAlexClient:
         base_url: str = OPENALEX_WORKS_URL,
         timeout_seconds: int = 60,
         max_retries: int = 2,
+        filter_expression: str = "",
     ) -> None:
         if not token or not token.strip():
             raise TokenConfigurationError("OPENALEX_TOKEN must be set")
+        self.filter_expression = filter_expression.strip()
         self._token = token.strip()
         self._session = session or requests.Session()
         self._base_url = base_url
@@ -85,7 +87,14 @@ class OpenAlexClient:
     def from_environment(cls) -> "OpenAlexClient":
         """Build a client from the container environment without reading a file."""
 
-        return cls(os.environ.get("OPENALEX_TOKEN", ""))
+        from src.search_criteria import openalex_filter
+
+        configured = os.environ.get("OPENALEX_FILTER")
+        if configured is None:
+            expression = openalex_filter()
+        else:
+            expression = "" if configured.strip().lower() == "none" else configured
+        return cls(os.environ.get("OPENALEX_TOKEN", ""), filter_expression=expression)
 
     def fetch_page(self, *, cursor: str, per_page: int) -> dict[str, Any]:
         """Fetch one cursor page and raise sanitized errors on transport failures."""
@@ -102,6 +111,8 @@ class OpenAlexClient:
             "cursor": cursor,
             "per-page": per_page,
         }
+        if self.filter_expression:
+            params["filter"] = self.filter_expression
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._session.get(
@@ -218,6 +229,7 @@ def _new_batch_metadata(
     mode: str,
     target_records: int,
     start_cursor: str | None,
+    filter_expression: str = "",
 ) -> dict[str, Any]:
     created_at = utc_now()
     return {
@@ -231,6 +243,7 @@ def _new_batch_metadata(
         "next_cursor": start_cursor,
         "raw_page_dir": str(Path("openalex") / batch_id),
         "raw_page_files": [],
+        "filter": filter_expression,
         "created_at": created_at,
         "updated_at": created_at,
     }
@@ -263,9 +276,12 @@ def _run_ingestion(
     if page_size < 1 or page_size > DEFAULT_PAGE_SIZE:
         raise IngestionError("Page size must be between 1 and 200")
 
+    # State is scoped to the search filter: a cursor from another filter (or from the
+    # old unfiltered ingestion) is meaningless for this one.
+    active_filter = getattr(client, "filter_expression", "")
     metadata_records = [
         record for record in store.list_metadata()
-        if record.get("source", "openalex") == "openalex"
+        if record.get("source", "openalex") == "openalex" and record.get("filter", "") == active_filter
     ]
     running = [record for record in metadata_records if record.get("status") in {"running", "transient_error", "rate_limited"}]
     if len(running) > 1:
@@ -294,6 +310,7 @@ def _run_ingestion(
             mode=mode,
             target_records=target_records,
             start_cursor=start_cursor,
+            filter_expression=active_filter,
         )
         store.write_metadata(metadata)
 

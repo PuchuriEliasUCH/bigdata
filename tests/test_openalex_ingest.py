@@ -372,3 +372,35 @@ def test_openalex_rate_limit_retries_after_header(tmp_path, monkeypatch):
     assert summary.status == "completed_target"
     assert session.calls_to_works == 2
     assert waits == [2]
+
+
+def test_client_sends_filter_only_when_configured():
+    session = CursorSession({"*": page(0, 1, None)})
+    OpenAlexClient("unit-test-token", session=session, filter_expression="title_and_abstract.search:(ai)").fetch_page(cursor="*", per_page=1)
+    OpenAlexClient("unit-test-token", session=session).fetch_page(cursor="*", per_page=1)
+    assert session.calls[0]["params"]["filter"] == "title_and_abstract.search:(ai)"
+    assert "filter" not in session.calls[1]["params"]
+
+
+def test_client_from_environment_uses_shared_ai_filter_unless_overridden(monkeypatch):
+    from src.search_criteria import openalex_filter
+
+    monkeypatch.setenv("OPENALEX_TOKEN", "unit-test-token")
+    monkeypatch.delenv("OPENALEX_FILTER", raising=False)
+    assert OpenAlexClient.from_environment().filter_expression == openalex_filter()
+    monkeypatch.setenv("OPENALEX_FILTER", "type:article")
+    assert OpenAlexClient.from_environment().filter_expression == "type:article"
+    monkeypatch.setenv("OPENALEX_FILTER", "none")
+    assert OpenAlexClient.from_environment().filter_expression == ""
+
+
+def test_changed_filter_starts_a_new_initial_batch_instead_of_reusing_old_cursor(tmp_path):
+    old = CursorSession({"*": page(0, 2, "old-cursor"), "old-cursor": page(2, 2, None)})
+    run_ingestion(tmp_path / "bronze", client=OpenAlexClient("unit-test-token", session=old), initial_target_records=2, page_size=2)
+    fresh = CursorSession({"*": page(100, 2, "new-cursor"), "new-cursor": page(102, 2, None)})
+    filtered = OpenAlexClient("unit-test-token", session=fresh, filter_expression="title_and_abstract.search:(ai)")
+    summary = run_ingestion(tmp_path / "bronze", client=filtered, initial_target_records=2, page_size=2)
+    assert summary.mode == "initial"
+    assert fresh.calls[0]["params"]["cursor"] == "*"
+    metadata = json.loads(Path(summary.metadata_path).read_text())
+    assert metadata["filter"] == "title_and_abstract.search:(ai)"
