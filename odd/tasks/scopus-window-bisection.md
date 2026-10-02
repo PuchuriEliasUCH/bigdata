@@ -49,6 +49,8 @@ Real bounded read test (2024-2025, target 200, temp dir inside the container): p
 
 Compaction (068063e): compact_pending publishes immutable groups per source and year by threshold (COMPACT_MIN_BATCHES=10), compacts rejected rows, prunes originals after validation. Time budget: INGEST_TIME_BUDGET_SECONDS=30 shared by active sources, batches pause as time_budget_reached and resume next run (no Silver fragmentation); INCREMENTAL_LIMIT=3000 is only a cap. 111 tests pass.
 
+Real bounded read test with the 30 s budget (3 cycles, 2024-2025, temp dir): each cycle 44.5-46.8 s total (ingestion ~29-38 s, Spark + compaction ~9-15 s), so it fits the one-minute scheduler. Measured pace: OpenAlex ~800 records per run (~3 s per page), Scopus ~180 per run. Spark time grew 8.9 -> 15.3 s over 3 runs (cross-batch dedup reads all previous Silver): main scalability risk toward 1M. Not verified in that test: Silver row counts and whether compaction fires (inspection script failed). OpenAlex now checks credits once per batch instead of per page; documentacion/operacion.md describes a one-off continuous initial load. Scopus page size stays 25 by decision (a larger page size was discussed and NOT applied).
+
 ## Next step
 1. Real bounded read test (2024-2025, INGEST_INITIAL_TARGET=200, temporary folder), authorized by the user.
 2. Design the Silver schema (enrich OpenAlex fields) and decide the role of Scopus.

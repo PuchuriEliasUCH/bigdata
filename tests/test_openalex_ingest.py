@@ -522,3 +522,20 @@ def test_time_budget_stops_before_the_next_year_and_the_next_run_continues(tmp_p
     assert _by_year(tmp_path / "bronze")[1] == 0
     run_openalex_years(tmp_path / "bronze", client=OpenAlexClient("unit-test-token", session=session), **options)
     assert _by_year(tmp_path / "bronze") == (4, 4)
+
+
+class CountingSession(CursorSession):
+    rate_checks = 0
+
+    def get(self, url, *, params, timeout):
+        if url.endswith("/rate-limit"):
+            self.rate_checks += 1
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_credits_are_checked_once_per_batch_not_once_per_page(tmp_path):
+    session = CountingSession({"*": page(0, 2, "c1"), "c1": page(2, 2, "c2"), "c2": page(4, 2, None)})
+    summary = run_ingestion(tmp_path / "bronze", client=OpenAlexClient("unit-test-token", session=session),
+                            initial_target_records=6, page_size=2)
+    assert summary.pages == 3
+    assert session.rate_checks == 1

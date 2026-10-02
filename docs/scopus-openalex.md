@@ -27,3 +27,5 @@ After each Silver run, `compact_pending` groups uncompacted batches by source an
 ## Time budget per run
 
 Each run gets `INGEST_TIME_BUDGET_SECONDS` (default 30, shared evenly by the active sources) so the one-minute scheduler never overlaps itself and Spark plus compaction still fit in the cycle. Before every API request an ingester compares the clock with its deadline; when it has passed, the batch is saved as `time_budget_reached` with its cursor or offset and the run ends. The next run resumes that batch, and because a paused batch is not complete it never reaches Silver half-filled, so a time cut does not fragment data. This applies to the initial load too, which is spread over several runs. `INCREMENTAL_LIMIT` (3,000) is only a cap on records per run. Planning requests (year totals) are not counted in the budget and run once.
+
+OpenAlex reads its credits once per batch instead of before every page, which halves the requests of a long batch. A one-off continuous initial load is described in `documentacion/operacion.md`.

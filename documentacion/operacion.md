@@ -50,3 +50,16 @@ Las rutas dentro del contenedor usan `/data/bronze` y `/data/silver`. No inspecc
 5. Tras compactar, validar manifiesto y rutas activas antes de considerar cualquier poda.
 
 El [índice](README.md) enlaza el recorrido general; ver también [ingesta](ingesta.md) y [filtrado/Silver](bronze-filtrado-silver.md).
+
+
+## Carga inicial continua (una sola vez)
+
+El cron limita cada corrida a `INGEST_TIME_BUDGET_SECONDS` (30 s) para no solaparse, así que la carga inicial de 100 000 registros por fuente se reparte en muchas corridas. Para hacerla de una sola vez, detené el servicio programado y lanzá una corrida con un presupuesto grande; después volvé al cron:
+
+```bash
+docker compose -f compose.yaml stop spark-pipeline
+docker compose -f compose.yaml run --rm -e INGEST_TIME_BUDGET_SECONDS=86400 spark-pipeline python -m src.run_pipeline
+docker compose -f compose.yaml up -d
+```
+
+El presupuesto se reparte entre las fuentes activas y cada una usa el suyo completo. Si la corrida se interrumpe, los lotes quedan guardados con su cursor y se retoman en la siguiente.

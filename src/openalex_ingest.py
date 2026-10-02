@@ -384,6 +384,9 @@ def _run_ingestion(
             metadata_path=metadata_path,
         )
 
+    # Credits are read once per batch: a page request that runs out of credits is
+    # already reported by the API as rate_limited, and checking every page doubled the requests.
+    credits_checked = False
     while record_count < target_records:
         if not cursor:
             break
@@ -397,7 +400,8 @@ def _run_ingestion(
         remaining = target_records - record_count
         request_size = min(page_size, remaining, DEFAULT_PAGE_SIZE)
         try:
-            if metadata.get("check_rate_limit", True):
+            if metadata.get("check_rate_limit", True) and not credits_checked:
+                credits_checked = True
                 limit = client.rate_limit()
                 metadata["credits_remaining"] = limit["credits_remaining"]
                 if limit["credits_remaining"] < 10:
