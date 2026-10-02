@@ -54,9 +54,9 @@ def test_scheduler_runs_both_sources_with_the_default_2011_to_current_year_range
     pipeline.main()
     year = datetime.now(timezone.utc).year
     shared = {"first_year": 2011, "last_year": year, "initial_target": 100_000, "incremental_limit": 6000}
-    # 80 s of ingestion per two-minute cycle, 60% to Scopus, which is the slower source.
-    assert seen["openalex"] == {**shared, "time_budget": 32.0}
-    assert seen["scopus"] == {"query": "TITLE(test)", **shared, "time_budget": 48.0, "requests_per_second": 5.0}
+    # 70 s of ingestion per two-minute cycle, 60% to Scopus, which is the slower source.
+    assert seen["openalex"] == {**shared, "time_budget": 28.0}
+    assert seen["scopus"] == {"query": "TITLE(test)", **shared, "time_budget": 42.0, "requests_per_second": 5.0}
     report = json.loads(capsys.readouterr().out)
     assert report["scopus_status"] == "quota_exceeded"
     assert report["event"] == "pipeline_partial"
@@ -159,7 +159,7 @@ def test_silver_gets_a_deadline_from_its_own_time_budget(monkeypatch, fake_spark
 
     monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
     pipeline.main()
-    assert 0 < fake_spark["deadline"][0] - time.monotonic() <= 25.5
+    assert 0 < fake_spark["deadline"][0] - time.monotonic() <= 20.5
     monkeypatch.setenv("SILVER_TIME_BUDGET_SECONDS", "10")
     pipeline.main()
     assert 0 < fake_spark["deadline"][1] - time.monotonic() <= 10.5

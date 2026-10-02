@@ -19,14 +19,14 @@ from src.spark_pipeline import process_pending_batches
 COMPLETE = {"completed", "completed_target", "completed_exhausted"}
 SCOPUS_SETTLED = {"completed_target", "completed_exhausted", "result_window_reached"}
 DEFAULT_FIRST_YEAR = 2011
-# The scheduler runs every two minutes: 80 s of ingestion leaves about 40 s for Spark and
-# compaction. Scopus is the slower source, so it gets the larger share.
-DEFAULT_TIME_BUDGET_SECONDS = 80.0
+# The scheduler runs every two minutes: 70 s of ingestion plus up to 20 s of Spark batches
+# leaves room for the batch already running and for compaction. Scopus is the slower source, so it gets the larger share.
+DEFAULT_TIME_BUDGET_SECONDS = 70.0
 DEFAULT_SCOPUS_SHARE = 0.6
 # Elsevier allows 9 requests per second per key; stay well below it.
 DEFAULT_SCOPUS_REQUESTS_PER_SECOND = 5.0
 # Spark starts no new batch after this many seconds; a rebuild then continues next run.
-DEFAULT_SILVER_TIME_BUDGET_SECONDS = 25.0
+DEFAULT_SILVER_TIME_BUDGET_SECONDS = 20.0
 
 
 def _overall(statuses: list[str], settled: set[str]) -> str | None:
