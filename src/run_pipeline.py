@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
+from src.gold import build_gold
 from src.openalex_ingest import OpenAlexRequestError, run_ingestion
 from src.scopus_ingest import run_scopus_years
 from src.spark_pipeline import process_pending_batches
@@ -16,6 +17,7 @@ from src.spark_pipeline import process_pending_batches
 def main() -> None:
     bronze_root = Path(os.environ.get("BRONZE_PATH", "/data/bronze"))
     silver_root = Path(os.environ.get("SILVER_PATH", "/data/silver"))
+    gold_root = Path(os.environ.get("GOLD_PATH", "/data/gold"))
     try:
         ingestion = run_ingestion(bronze_root)
         openalex_status = ingestion.status
@@ -46,6 +48,10 @@ def main() -> None:
     )
     try:
         processing = process_pending_batches(spark, bronze_root, silver_root)
+        # Gold only changes when Silver does, so skip the rebuild on idle minutes.
+        gold = None
+        if processing.processed_batches or not (gold_root / "works").exists():
+            gold = build_gold(spark, silver_root, gold_root)
     finally:
         spark.stop()
 
@@ -64,6 +70,7 @@ def main() -> None:
                 "scopus_status": scopus.status if scopus else None,
                 "processed_batches": processing.processed_batches,
                 "skipped_batches": processing.skipped_batches,
+                "gold_work_rows": gold.work_rows if gold else None,
                 "valid_rows": processing.valid_rows,
                 "rejected_rows": processing.rejected_rows,
             },

@@ -15,3 +15,7 @@ Both sources derive their search from one term list, `AI_TERMS` in `src/search_c
 ## Parquet layers
 
 Bronze pages are Parquet (`page-NNNNNN.parquet`: `batch_id`, `page_number`, `record_index`, `record_json`), rejected rows are Parquet, and Silver is Parquet. Only control files (`batch_metadata/*.json`, `_processing/*.json`, compaction manifests) stay JSON. Spark still reads JSON pages written before this change, including a batch that mixes both formats.
+
+## Gold layer
+
+`build_gold` (`src/gold.py`) reads the active Silver paths, gives historic batches the current columns, and writes two Parquet tables under `GOLD_PATH` (default `/data/gold`): `works` (one row per publication, reusing `unique_publications`, so OpenAlex wins a shared DOI and DOI-less records stay individually traceable) and `works_by_year_source` (`publications`, `total_citations`, `open_access_publications`). Each table is staged in a temporary directory and swapped in, so readers never see a partial table. `run_pipeline` rebuilds Gold only when new Silver batches were processed or Gold does not exist yet.

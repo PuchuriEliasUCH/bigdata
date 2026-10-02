@@ -5,17 +5,6 @@ import pytest
 from src.compaction import active_silver_paths, compact_batches, resolve_completed_paths, prune_compacted_originals
 
 
-@pytest.fixture(scope="module")
-def spark():
-    import os
-    os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
-    os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
-    from pyspark.sql import SparkSession
-    session = SparkSession.builder.master("local[2]").appName("compaction-tests").config("spark.ui.enabled", "false").getOrCreate()
-    yield session
-    session.stop()
-
-
 def test_compaction_is_idempotent_and_readers_see_one_version(spark, tmp_path):
     root = tmp_path / "silver"
     for batch, id_value in (("one", "A"), ("two", "B")):

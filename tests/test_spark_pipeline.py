@@ -8,23 +8,6 @@ import src.spark_pipeline as spark_pipeline
 from src.spark_pipeline import process_pending_batches
 
 
-@pytest.fixture(scope="session")
-def spark():
-    os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
-    os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
-    from pyspark.sql import SparkSession
-
-    session = (
-        SparkSession.builder.master("local[2]")
-        .appName("openalex-pipeline-tests")
-        .config("spark.ui.enabled", "false")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
-
-
 def write_completed_batch(bronze_root: Path, batch_id: str, records):
     raw_dir = bronze_root / "openalex" / batch_id
     metadata_dir = bronze_root / "batch_metadata"

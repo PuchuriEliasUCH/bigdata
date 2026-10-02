@@ -3,6 +3,7 @@ import json
 import pytest
 
 import src.run_pipeline as pipeline
+from src.gold import GoldSummary
 
 
 @pytest.fixture(autouse=True)
@@ -10,6 +11,15 @@ def isolated_scopus_environment(monkeypatch):
     """Keep container .env values from routing tests to the real Scopus API."""
     for name in ("SCOPUS_QUERY", "SCOPUS_FIRST_YEAR", "SCOPUS_LAST_YEAR", "SCOPUS_API"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def gold_calls(tmp_path, monkeypatch):
+    """Record Gold builds instead of running Spark over the fake session."""
+    calls = []
+    monkeypatch.setenv("GOLD_PATH", str(tmp_path / "gold"))
+    monkeypatch.setattr(pipeline, "build_gold", lambda spark, silver, gold: calls.append((silver, gold)) or GoldSummary(3, 2))
+    return calls
 
 
 def test_scheduler_runs_scopus_when_query_is_configured(tmp_path, monkeypatch, capsys):
@@ -80,3 +90,36 @@ def test_scheduler_partitions_scopus_query_by_year_when_range_is_set(tmp_path, m
     pipeline.main()
     assert calls == [{"query": "TITLE(test)", "first_year": 2020, "last_year": 2021}]
     assert json.loads(capsys.readouterr().out)["scopus_status"] == "result_window_reached"
+
+
+def _run_with_processing(monkeypatch, tmp_path, processed):
+    monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
+    monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
+    monkeypatch.setattr(pipeline, "run_ingestion", lambda root: type("OA", (), dict(batch_id="oa", mode="initial", status="completed_target", records=1, pages=1))())
+    class Builder:
+        def master(self, value): return self
+        def appName(self, value): return self
+        def config(self, key, value): return self
+        def getOrCreate(self): return type("Spark", (), {"stop": lambda self: None})()
+    monkeypatch.setattr(pipeline.SparkSession, "builder", Builder())
+    monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver: type("Result", (), dict(processed_batches=processed, skipped_batches=(), valid_rows=0, rejected_rows=0))())
+    pipeline.main()
+
+
+def test_gold_is_rebuilt_when_new_silver_batches_were_processed(tmp_path, monkeypatch, capsys, gold_calls):
+    _run_with_processing(monkeypatch, tmp_path, ("batch-1",))
+    assert gold_calls == [(tmp_path / "silver", tmp_path / "gold")]
+    report = json.loads(capsys.readouterr().out)
+    assert report["gold_work_rows"] == 3
+
+
+def test_gold_is_skipped_when_nothing_changed_and_it_already_exists(tmp_path, monkeypatch, capsys, gold_calls):
+    (tmp_path / "gold" / "works").mkdir(parents=True)
+    _run_with_processing(monkeypatch, tmp_path, ())
+    assert gold_calls == []
+    assert json.loads(capsys.readouterr().out)["gold_work_rows"] is None
+
+
+def test_gold_is_built_when_missing_even_without_new_batches(tmp_path, monkeypatch, gold_calls):
+    _run_with_processing(monkeypatch, tmp_path, ())
+    assert len(gold_calls) == 1
