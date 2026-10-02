@@ -96,23 +96,9 @@ class OpenAlexClient:
             expression = "" if configured.strip().lower() == "none" else configured
         return cls(os.environ.get("OPENALEX_TOKEN", ""), filter_expression=expression)
 
-    def fetch_page(self, *, cursor: str, per_page: int) -> dict[str, Any]:
-        """Fetch one cursor page and raise sanitized errors on transport failures."""
+    def _request_json(self, params: dict[str, Any]) -> Any:
+        """GET with bounded retries; errors are sanitized so the token never leaks."""
 
-        if not cursor:
-            raise IngestionError("A non-empty OpenAlex cursor is required")
-        if per_page < 1 or per_page > DEFAULT_PAGE_SIZE:
-            raise IngestionError("OpenAlex per-page must be between 1 and 200")
-
-        # The token is sent only as an HTTP parameter. It is never included in
-        # a batch metadata record, log message, exception text, or notebook.
-        params = {
-            "api_key": self._token,
-            "cursor": cursor,
-            "per-page": per_page,
-        }
-        if self.filter_expression:
-            params["filter"] = self.filter_expression
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._session.get(
@@ -140,6 +126,53 @@ class OpenAlexClient:
                 raise OpenAlexRequestError(f"OpenAlex request failed{suffix}", status, status_code, retry_after) from None
             except (TypeError, ValueError):
                 raise OpenAlexRequestError("OpenAlex returned invalid JSON", "failed") from None
+        return payload
+
+    def for_year(self, year: int) -> "OpenAlexClient":
+        """Same client restricted to one publication year, with its own filter lineage."""
+
+        import copy
+
+        clone = copy.copy(self)
+        clone.filter_expression = ",".join(
+            part for part in (self.filter_expression, f"publication_year:{year}") if part
+        )
+        return clone
+
+    def year_totals(self, first_year: int, last_year: int) -> dict[int, int]:
+        """Volume per publication year from a single group_by request."""
+
+        years = f"publication_year:{first_year}-{last_year}"
+        params = {
+            "api_key": self._token,
+            "filter": ",".join(part for part in (self.filter_expression, years) if part),
+            "group_by": "publication_year",
+        }
+        payload = self._request_json(params)
+        groups = payload.get("group_by") if isinstance(payload, dict) else None
+        if not isinstance(groups, list):
+            raise OpenAlexRequestError("OpenAlex response did not contain year groups", "failed")
+        counts = {int(group["key"]): int(group["count"]) for group in groups if str(group.get("key", "")).isdigit()}
+        return {year: counts.get(year, 0) for year in range(first_year, last_year + 1)}
+
+    def fetch_page(self, *, cursor: str, per_page: int) -> dict[str, Any]:
+        """Fetch one cursor page and raise sanitized errors on transport failures."""
+
+        if not cursor:
+            raise IngestionError("A non-empty OpenAlex cursor is required")
+        if per_page < 1 or per_page > DEFAULT_PAGE_SIZE:
+            raise IngestionError("OpenAlex per-page must be between 1 and 200")
+
+        # The token is sent only as an HTTP parameter. It is never included in
+        # a batch metadata record, log message, exception text, or notebook.
+        params = {
+            "api_key": self._token,
+            "cursor": cursor,
+            "per-page": per_page,
+        }
+        if self.filter_expression:
+            params["filter"] = self.filter_expression
+        payload = self._request_json(params)
 
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
             raise OpenAlexRequestError("OpenAlex response did not contain a results list", "failed")
@@ -451,3 +484,69 @@ def run_ingestion(
             incremental_limit=incremental_limit,
             page_size=page_size,
         )
+
+
+def run_openalex_years(
+    bronze_root: str | Path,
+    *,
+    client: OpenAlexClient | None = None,
+    first_year: int,
+    last_year: int,
+    year_quotas: dict[int, int],
+    year_totals: dict[int, int],
+    incremental_limit: int = DEFAULT_INCREMENTAL_LIMIT,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> list[IngestionSummary]:
+    """Fill each year's initial quota, then grow the least filled year first.
+
+    Every year is its own filter lineage, so its cursor and batches never mix with
+    another year's. Initial runs finish all pending quotas; later runs spend one
+    incremental budget in order of how complete each year is.
+    """
+
+    store = BatchStateStore(Path(bronze_root))
+    base = client or OpenAlexClient.from_environment()
+    clients = {
+        year: base.for_year(year)
+        for year in range(first_year, last_year + 1)
+        if year_quotas.get(year, 0) > 0
+    }
+
+    def history(year: int) -> list[dict[str, Any]]:
+        expression = clients[year].filter_expression
+        return [
+            record for record in store.list_metadata()
+            if record.get("source", "openalex") == "openalex" and record.get("filter", "") == expression
+        ]
+
+    def initial_done(year: int) -> bool:
+        return any(
+            record.get("mode") == "initial" and record.get("status") in {"completed", "completed_target", "completed_exhausted"}
+            for record in history(year)
+        )
+
+    def fill_ratio(year: int) -> float:
+        total = year_totals.get(year, 0)
+        taken = sum(int(record.get("record_count", 0)) for record in history(year))
+        return taken / total if total else 1.0
+
+    summaries: list[IngestionSummary] = []
+    pending = [year for year in clients if not initial_done(year)]
+    if pending:
+        for year in pending:
+            summaries.append(run_ingestion(
+                bronze_root, client=clients[year], initial_target_records=year_quotas[year],
+                incremental_limit=incremental_limit, page_size=page_size,
+            ))
+        return summaries
+    budget = incremental_limit
+    for year in sorted(clients, key=fill_ratio):
+        if budget <= 0:
+            break
+        summary = run_ingestion(
+            bronze_root, client=clients[year], initial_target_records=year_quotas[year],
+            incremental_limit=budget, page_size=page_size,
+        )
+        budget -= summary.records
+        summaries.append(summary)
+    return summaries

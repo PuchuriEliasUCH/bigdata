@@ -404,3 +404,85 @@ def test_changed_filter_starts_a_new_initial_batch_instead_of_reusing_old_cursor
     assert fresh.calls[0]["params"]["cursor"] == "*"
     metadata = json.loads(Path(summary.metadata_path).read_text())
     assert metadata["filter"] == "title_and_abstract.search:(ai)"
+
+
+class YearSession:
+    """Fake OpenAlex that serves per-year volumes with offset cursors and group_by totals."""
+
+    def __init__(self, volumes):
+        self.volumes = volumes
+        self.calls = []
+
+    def get(self, url, *, params, timeout):
+        import re
+
+        if url.endswith("/rate-limit"):
+            return FakeResponse({"rate_limit": {"credits_remaining": 100000, "resets_at": "tomorrow"}})
+        self.calls.append(dict(params))
+        if "group_by" in params:
+            return FakeResponse({"group_by": [{"key": str(y), "count": n} for y, n in self.volumes.items()]})
+        year = int(re.search(r"publication_year:(\d{4})", params["filter"]).group(1))
+        offset = 0 if params["cursor"] == "*" else int(params["cursor"])
+        count = min(params["per-page"], self.volumes[year] - offset)
+        results = [
+            {"id": f"https://openalex.org/W{year}x{offset + i}", "title": "t", "publication_year": year,
+             "publication_date": f"{year}-01-01", "topics": [{"id": "T", "display_name": "x"}]}
+            for i in range(count)
+        ]
+        more = offset + count < self.volumes[year]
+        return FakeResponse({"meta": {"next_cursor": str(offset + count) if more else None}, "results": results})
+
+
+def _ingested_ids(root):
+    import pyarrow.parquet as pq
+
+    ids = []
+    for path in (root / "openalex").glob("*/page-*.parquet"):
+        ids += [json.loads(row["record_json"])["id"] for row in pq.read_table(path).to_pylist()]
+    return ids
+
+
+def _by_year(root):
+    ids = _ingested_ids(root)
+    return tuple(len([i for i in ids if f"W{year}x" in i]) for year in (2020, 2021))
+
+
+def test_for_year_adds_the_publication_year_to_the_filter():
+    base = OpenAlexClient("unit-test-token", session=CursorSession({}), filter_expression="title_and_abstract.search:(ai)")
+    assert base.for_year(2015).filter_expression == "title_and_abstract.search:(ai),publication_year:2015"
+    assert OpenAlexClient("unit-test-token", session=CursorSession({})).for_year(2015).filter_expression == "publication_year:2015"
+    assert base.filter_expression == "title_and_abstract.search:(ai)"
+
+
+def test_year_totals_use_one_group_by_request():
+    session = YearSession({2020: 7, 2021: 9})
+    client = OpenAlexClient("unit-test-token", session=session, filter_expression="title_and_abstract.search:(ai)")
+    assert client.year_totals(2019, 2021) == {2019: 0, 2020: 7, 2021: 9}
+    assert len(session.calls) == 1
+    assert session.calls[0]["group_by"] == "publication_year"
+    assert session.calls[0]["filter"] == "title_and_abstract.search:(ai),publication_year:2019-2021"
+
+
+def _year_options(session):
+    return dict(
+        client=OpenAlexClient("unit-test-token", session=session), first_year=2020, last_year=2021,
+        year_quotas={2020: 3, 2021: 2}, year_totals={2020: 10, 2021: 10}, page_size=1,
+    )
+
+
+def test_each_openalex_year_stops_at_its_initial_quota(tmp_path):
+    from src.openalex_ingest import run_openalex_years
+
+    run_openalex_years(tmp_path / "bronze", **_year_options(YearSession({2020: 10, 2021: 10})))
+    assert _by_year(tmp_path / "bronze") == (3, 2)
+
+
+def test_openalex_incremental_serves_the_least_filled_year_first(tmp_path):
+    from src.openalex_ingest import run_openalex_years
+
+    session = YearSession({2020: 10, 2021: 10})
+    run_openalex_years(tmp_path / "bronze", **_year_options(session))
+    run_openalex_years(tmp_path / "bronze", incremental_limit=2, **_year_options(session))
+    assert _by_year(tmp_path / "bronze") == (3, 4)
+    run_openalex_years(tmp_path / "bronze", incremental_limit=2, **_year_options(session))
+    assert _by_year(tmp_path / "bronze") == (5, 4)
