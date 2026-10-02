@@ -31,7 +31,20 @@ Complete massive Scopus ingestion (100,000 initial records, then minute-by-minut
 - `pytest` green.
 
 ## Progress / evidence
-(Route per task and commit ids are recorded here.)
+Route: inline for every task (the subagent writer hung twice with no changes). Tests run with `docker compose -f compose.yaml build spark-pipeline` BEFORE `run --rm spark-pipeline pytest -q`, because `src/` and `tests/` are copied into the image. State as of 2026-10-02: 94 tests pass.
+
+Commits on `feat/global-bronze-cap`: 1a6fb3d, dcf1f1c (baseline) - 31afa9b (Scopus bisection) - 2656a36 (shared AI terms, OpenAlex filter) - 1cf064c (Bronze and rejected as Parquet) - 66c2710 (Gold, later removed) - a2b361c, 26614bf, 754c272 (year-stratified ingestion) - 0b0d7be (Gold removed) - 7720ccf (rejected moved to silver/rejected).
+
+Context (context.md): predict emerging AI research topics (supervised, topic-per-year unit, temporal split, CRISP-DM). The course needs at least 1M records. Current phase is Bronze and Silver only; Gold and the evidence notebook are postponed (the notebook must be redone at the end and is stale).
+
+Layout: `bronze/{openalex,scopus}/<batch>/page-N.parquet` (one row per record: batch_id, page_number, record_index, record_json raw text), `bronze/batch_metadata/*.json`, `bronze/plans/<source>.json`; `silver/works/<batch>` (valid rows, no reason field), `silver/rejected/<batch>` (record_json + rejection_reason), `silver/_processing/`. Legacy JSON pages stay readable.
+
+Ingestion: INGEST_FIRST_YEAR (2011), INGEST_LAST_YEAR, INGEST_INITIAL_TARGET (100k per source, split by year in proportion to volume), INCREMENTAL_LIMIT (1000, least filled year first), OPENALEX_FILTER (`none` disables), SCOPUS_QUERY (never invented). Scopus cursor is restricted for this key (403 ENTITLEMENTS_ERROR). OpenAlex filter verified (HTTP 200, 7.1M results; Scopus about 4.4M for the same terms).
+
+Known gaps: Silver drops abstract, authors, institutions, countries, keywords, language and counts_by_year (present in OpenAlex Bronze); Scopus standard view has no abstract (COMPLETE view not verified); cited_by_count is a snapshot, so it leaks future citations for features as of year t; cron overlap during the long initial phase is unverified; data/bronze and data/silver were deleted (root-owned files, removed through the container, not sudo).
+
+Engram: `mem_save` and `mem_session_start` failed at 2026-10-02 with "Claude host session registration could not be confirmed"; this section is the fallback record until Engram is reconnected.
 
 ## Next step
-SWB-0 then SWB-1.
+1. Real bounded read test (2024-2025, INGEST_INITIAL_TARGET=200, temporary folder), authorized by the user.
+2. Design the Silver schema (enrich OpenAlex fields) and decide the role of Scopus.
