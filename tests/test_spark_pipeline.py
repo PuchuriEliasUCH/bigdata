@@ -72,22 +72,24 @@ def test_processing_validates_normalizes_deduplicates_and_rejects(spark, tmp_pat
     summary = process_pending_batches(spark, bronze_root, silver_root)
 
     assert summary.processed_batches == ("initial-test",)
-    assert summary.valid_rows == 1
-    assert summary.rejected_rows == 3
+    # A record without topics is kept and flagged; only the duplicate and the untitled one are rejected.
+    assert summary.valid_rows == 2
+    assert summary.rejected_rows == 2
     assert len(list((silver_root / "works" / "initial-test").glob("part-*.parquet"))) == 1
 
-    valid_rows = spark.read.parquet(str(silver_root / "works" / "initial-test")).collect()
-    assert len(valid_rows) == 1
-    assert valid_rows[0]["source_id"] == "https://openalex.org/W1"
-    assert valid_rows[0]["publication_year"] == 2024
-    assert valid_rows[0]["topic_names"] == ["Data Engineering"]
+    valid_rows = {row["source_id"]: row for row in spark.read.parquet(str(silver_root / "works" / "initial-test")).collect()}
+    assert set(valid_rows) == {"https://openalex.org/W1", "https://openalex.org/W3"}
+    first = valid_rows["https://openalex.org/W1"]
+    assert first["publication_year"] == 2024
+    assert [topic["name"] for topic in first["topics"]] == ["Data Engineering"] and first["has_topics"] is True
+    assert valid_rows["https://openalex.org/W3"]["has_topics"] is False
 
     rejected_rows = spark.read.parquet(str(silver_root / "rejected" / "initial-test")).collect()
     reasons = {row["rejection_reason"] for row in rejected_rows}
-    assert len(rejected_rows) == 3
+    assert len(rejected_rows) == 2
     assert "duplicate_source_id" in reasons
     assert any("missing_title" in reason for reason in reasons)
-    assert any("missing_topics" in reason for reason in reasons)
+    assert not any("missing_topics" in reason for reason in reasons)
 
 
 def test_processing_reads_raw_pages_without_driver_row_list(spark, tmp_path, monkeypatch):

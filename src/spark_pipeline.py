@@ -17,6 +17,9 @@ from typing import Any, Iterator
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+from src.silver_columns import normalize_unicode, openalex_columns, scopus_columns
+from src.silver_rules import with_rejection_reasons
 from pyspark.sql.types import (
     ArrayType,
     BooleanType,
@@ -29,7 +32,7 @@ from pyspark.sql.types import (
 
 
 # Bump when Silver's columns or rules change: the next run rebuilds Silver from Bronze.
-SILVER_SCHEMA_VERSION = 2
+SILVER_SCHEMA_VERSION = 3
 
 
 class ProcessingError(RuntimeError):
@@ -66,26 +69,6 @@ def unique_publications(records: DataFrame) -> DataFrame:
     return records.withColumn("_rank", F.row_number().over(window)).where(F.col("_rank") == 1).drop("_rank")
 
 
-RAW_SCHEMA = StructType(
-    [
-        StructField("batch_id", StringType(), False),
-        StructField("record_order", IntegerType(), False),
-        StructField("record_json", StringType(), False),
-        StructField("source_id", StringType(), True),
-        StructField("title", StringType(), True),
-        StructField("publication_year", IntegerType(), True),
-        StructField("publication_date", StringType(), True),
-        StructField("topic_ids", ArrayType(StringType(), containsNull=False), False),
-        StructField("topic_names", ArrayType(StringType(), containsNull=False), False),
-        StructField("work_type", StringType(), True),
-        StructField("doi", StringType(), True),
-        StructField("cited_by_count", LongType(), True),
-        StructField("is_oa", BooleanType(), True),
-        StructField("source_name", StringType(), True),
-    ]
-)
-
-
 RAW_PAGE_SCHEMA = StructType(
     [
         # Parsing each result as JSON text avoids inferring the highly variable
@@ -99,18 +82,6 @@ SCOPUS_PAGE_SCHEMA = StructType([
         StructField("entry", ArrayType(StringType()), True),
     ]), True),
 ])
-
-TOPIC_SCHEMA = ArrayType(
-    StructType(
-        [
-            StructField("id", StringType(), True),
-            StructField("display_name", StringType(), True),
-            StructField("name", StringType(), True),
-        ]
-    ),
-    containsNull=True,
-)
-
 
 def _raw_page_paths(bronze_root: Path, metadata: dict[str, Any]) -> list[Path]:
     raw_page_dir = Path(str(metadata.get("raw_page_dir", "")))
@@ -200,104 +171,8 @@ def _load_batch_dataframe(
 
     source = metadata.get("source", "openalex")
     records = _load_records(spark, batch_id, page_paths, source)
-    if source == "scopus":
-        def field(name: str) -> F.Column:
-            return F.trim(F.get_json_object(F.col("_record_json"), f"$.{name}"))
-
-        date = field("prism:coverDate")
-        return records.select(
-            F.lit(batch_id).alias("batch_id"),
-            "record_order",
-            F.col("_record_json").alias("record_json"),
-            field("eid").alias("source_id"),
-            field("dc:title").alias("title"),
-            F.regexp_extract(date, r"^(\d{4})", 1).cast("int").alias("publication_year"),
-            date.alias("publication_date"),
-            F.array().cast("array<string>").alias("topic_ids"),
-            F.array().cast("array<string>").alias("topic_names"),
-            field("subtypeDescription").alias("work_type"),
-            field("prism:doi").alias("doi"),
-            field("citedby-count").cast("long").alias("cited_by_count"),
-            F.lit(None).cast("boolean").alias("is_oa"),
-            field("prism:publicationName").alias("source_name"),
-        )
-    records = records.withColumn(
-        "_topics",
-        F.coalesce(
-            F.from_json(F.get_json_object(F.col("_record_json"), "$.topics"), TOPIC_SCHEMA),
-            F.array().cast(TOPIC_SCHEMA),
-        ),
-    )
-    topic_ids = F.expr(
-        "filter(transform(_topics, topic -> trim(topic.id)), "
-        "topic -> topic is not null and topic <> '')"
-    )
-    topic_names = F.expr(
-        "filter(transform(_topics, topic -> "
-        "case when topic.display_name is not null and trim(topic.display_name) <> '' "
-        "then trim(topic.display_name) else trim(topic.name) end), "
-        "topic -> topic is not null and topic <> '')"
-    )
-
-    def json_value(path: str) -> F.Column:
-        return F.get_json_object(F.col("_record_json"), path)
-
-    publication_year_text = F.trim(json_value("$.publication_year"))
-    cited_by_count_text = F.trim(json_value("$.cited_by_count"))
-    is_oa_text = json_value("$.open_access.is_oa")
-    return records.select(
-        F.lit(batch_id).alias("batch_id"),
-        "record_order",
-        F.col("_record_json").alias("record_json"),
-        F.trim(json_value("$.id")).alias("source_id"),
-        F.trim(json_value("$.title")).alias("title"),
-        F.when(
-            publication_year_text.rlike(r"^-?\d+$"),
-            publication_year_text.cast(IntegerType()),
-        ).alias("publication_year"),
-        F.trim(json_value("$.publication_date")).alias("publication_date"),
-        topic_ids.alias("topic_ids"),
-        topic_names.alias("topic_names"),
-        F.trim(json_value("$.type")).alias("work_type"),
-        F.trim(json_value("$.doi")).alias("doi"),
-        F.when(
-            cited_by_count_text.rlike(r"^-?\d+$"),
-            cited_by_count_text.cast(LongType()),
-        ).alias("cited_by_count"),
-        F.when(is_oa_text.isin("true", "false"), is_oa_text.cast(BooleanType())).alias(
-            "is_oa"
-        ),
-        F.trim(json_value("$.primary_location.source.display_name")).alias("source_name"),
-    )
-
-
-def _validation_reason(dataframe: DataFrame, source: str = "openalex") -> DataFrame:
-    """Create auditable, composable reasons instead of dropping bad records."""
-
-    reasons = F.array(
-        F.when(
-            F.col("source_id").isNull()
-            | (F.length(F.trim(F.col("source_id"))) == 0),
-            F.lit("missing_source_id"),
-        ),
-        F.when(
-            F.col("title").isNull() | (F.length(F.trim(F.col("title"))) == 0),
-            F.lit("missing_title"),
-        ),
-        F.when(
-            F.col("publication_year").isNull()
-            & (
-                F.col("publication_date").isNull()
-                | (F.length(F.trim(F.col("publication_date"))) == 0)
-            ),
-            F.lit("missing_publication_year_or_date"),
-        ),
-        F.when(
-            (F.size(F.col("topic_ids")) + F.size(F.col("topic_names"))) == 0,
-            F.lit("missing_topics"),
-        ) if source == "openalex" else F.lit(None),
-    )
-    return dataframe.withColumn("rejection_reason", F.concat_ws("; ", reasons))
+    extract = scopus_columns if source == "scopus" else openalex_columns
+    return extract(records).withColumn("batch_id", F.lit(batch_id))
 
 
 def _rejected_columns(dataframe: DataFrame) -> DataFrame:
@@ -310,7 +185,9 @@ def _rejected_columns(dataframe: DataFrame) -> DataFrame:
     )
 
 
-def _silver_columns(dataframe: DataFrame, processed_at: str, source: str = "openalex") -> DataFrame:
+def _silver_columns(
+    dataframe: DataFrame, processed_at: str, source: str = "openalex", ingested_at: str | None = None
+) -> DataFrame:
     publication_year = F.when(
         F.col("publication_year").isNotNull(), F.col("publication_year")
     ).otherwise(F.regexp_extract(F.col("publication_date"), r"^(\d{4})", 1).cast("int"))
@@ -318,18 +195,33 @@ def _silver_columns(dataframe: DataFrame, processed_at: str, source: str = "open
         "batch_id",
         F.lit(source).alias("source"),
         "source_id",
+        "doi",
+        F.regexp_replace(F.lower(F.trim(F.col("doi"))), r"^(https?://(dx\.)?doi\.org/|doi:)", "").alias("normalized_doi"),
+        F.lit(ingested_at).cast("string").alias("ingested_at"),
+        F.lit(SILVER_SCHEMA_VERSION).alias("schema_version"),
         "title",
         publication_year.alias("publication_year"),
         "publication_date",
-        "topic_ids",
-        "topic_names",
-        (F.size(F.col("topic_ids")) + F.size(F.col("topic_names"))).alias("topic_count"),
         "work_type",
-        "doi",
-        F.regexp_replace(F.lower(F.trim(F.col("doi"))), r"^(https?://(dx\.)?doi\.org/|doi:)", "").alias("normalized_doi"),
+        "language",
+        "venue",
+        "abstract",
+        "keywords",
+        F.col("abstract").isNotNull().alias("has_abstract"),
+        "topics",
+        "primary_topic",
+        F.size(F.col("topics")).alias("topic_count"),
+        (F.size(F.col("topics")) > 0).alias("has_topics"),
+        "author_count",
+        "authors",
+        "institutions",
+        "country_codes",
+        "country_names",
         "cited_by_count",
+        "counts_by_year",
         "is_oa",
-        "source_name",
+        "is_retracted",
+        "is_paratext",
         F.lit(processed_at).alias("processed_at"),
     )
 
@@ -386,7 +278,7 @@ def _process_one_batch(
     batch_id = str(metadata["batch_id"])
     source = metadata.get("source", "openalex")
     base = _load_batch_dataframe(spark, bronze_root, metadata)
-    validated = _validation_reason(base, source)
+    validated = with_rejection_reasons(base)
     invalid = validated.filter(F.col("rejection_reason") != "")
     valid = validated.filter(F.col("rejection_reason") == "")
 
@@ -437,7 +329,7 @@ def _process_one_batch(
     silver_path = silver_root / "works" / batch_id
     rejected_path = silver_root / "rejected" / batch_id
     (
-        _silver_columns(accepted, processed_at, source).repartition(output_partitions(int(metadata.get("record_count", 0))))
+        normalize_unicode(_silver_columns(accepted, processed_at, source, metadata.get("created_at"))).repartition(output_partitions(int(metadata.get("record_count", 0))))
         .write.mode("overwrite")
         .option("compression", "snappy")
         .parquet(str(silver_path))
