@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import pytest
 
 import src.run_pipeline as pipeline
-from src.gold import GoldSummary
 from src.openalex_ingest import OpenAlexRequestError
 
 
@@ -16,13 +15,12 @@ def isolated_environment(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
-    monkeypatch.setenv("GOLD_PATH", str(tmp_path / "gold"))
 
 
 @pytest.fixture(autouse=True)
-def fake_spark_and_gold(monkeypatch):
-    """Record Gold builds and replace Spark so these tests only exercise orchestration."""
-    calls = {"gold": [], "processed": ()}
+def fake_spark(monkeypatch):
+    """Replace Spark so these tests only exercise orchestration."""
+    calls = {"processed": ()}
 
     class Builder:
         def master(self, value): return self
@@ -31,7 +29,6 @@ def fake_spark_and_gold(monkeypatch):
         def getOrCreate(self): return type("Spark", (), {"stop": lambda self: None})()
 
     monkeypatch.setattr(pipeline.SparkSession, "builder", Builder())
-    monkeypatch.setattr(pipeline, "build_gold", lambda spark, silver, gold: calls["gold"].append((silver, gold)) or GoldSummary(3, 2))
     monkeypatch.setattr(pipeline, "process_pending_batches", lambda spark, bronze, silver: type(
         "Result", (), dict(processed_batches=calls["processed"], skipped_batches=(), valid_rows=0, rejected_rows=0))())
     return calls
@@ -89,7 +86,7 @@ def test_openalex_rate_failure_does_not_prevent_scopus_and_pending_silver(monkey
     assert report["openalex_status"] == "rate_limited" and report["event"] == "pipeline_partial"
 
 
-def test_scopus_planning_failure_is_reported_without_stopping_silver_or_gold(monkeypatch, capsys, fake_spark_and_gold):
+def test_scopus_planning_failure_is_reported_without_stopping_silver(monkeypatch, capsys):
     from src.openalex_ingest import IngestionError
 
     monkeypatch.setenv("SCOPUS_QUERY", "TITLE(test)")
@@ -98,7 +95,7 @@ def test_scopus_planning_failure_is_reported_without_stopping_silver_or_gold(mon
     pipeline.main()
     report = json.loads(capsys.readouterr().out)
     assert report["scopus_status"] == "failed" and report["event"] == "pipeline_partial"
-    assert len(fake_spark_and_gold["gold"]) == 1
+    assert report["processed_batches"] == []
 
 
 def test_report_sums_records_across_yearly_openalex_batches(monkeypatch, capsys):
@@ -107,23 +104,9 @@ def test_report_sums_records_across_yearly_openalex_batches(monkeypatch, capsys)
     assert json.loads(capsys.readouterr().out)["ingested_records"] == 12
 
 
-def test_gold_is_rebuilt_when_new_silver_batches_were_processed(tmp_path, monkeypatch, capsys, fake_spark_and_gold):
-    fake_spark_and_gold["processed"] = ("batch-1",)
+def test_pipeline_stops_at_silver_and_reports_no_gold(monkeypatch, capsys):
     monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
     pipeline.main()
-    assert fake_spark_and_gold["gold"] == [(tmp_path / "silver", tmp_path / "gold")]
-    assert json.loads(capsys.readouterr().out)["gold_work_rows"] == 3
-
-
-def test_gold_is_skipped_when_nothing_changed_and_it_already_exists(tmp_path, monkeypatch, capsys, fake_spark_and_gold):
-    (tmp_path / "gold" / "works").mkdir(parents=True)
-    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
-    pipeline.main()
-    assert fake_spark_and_gold["gold"] == []
-    assert json.loads(capsys.readouterr().out)["gold_work_rows"] is None
-
-
-def test_gold_is_built_when_missing_even_without_new_batches(monkeypatch, fake_spark_and_gold):
-    monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: [openalex_summary()])
-    pipeline.main()
-    assert len(fake_spark_and_gold["gold"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert not hasattr(pipeline, "build_gold")
+    assert not any("gold" in key for key in report)

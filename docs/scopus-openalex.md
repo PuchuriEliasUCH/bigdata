@@ -16,10 +16,6 @@ Both sources derive their search from one term list, `AI_TERMS` in `src/search_c
 
 Bronze pages are Parquet (`page-NNNNNN.parquet`: `batch_id`, `page_number`, `record_index`, `record_json`), rejected rows are Parquet, and Silver is Parquet. Only control files (`batch_metadata/*.json`, `_processing/*.json`, compaction manifests) stay JSON. Spark still reads JSON pages written before this change, including a batch that mixes both formats.
 
-## Gold layer
-
-`build_gold` (`src/gold.py`) reads the active Silver paths, gives historic batches the current columns, and writes two Parquet tables under `GOLD_PATH` (default `/data/gold`): `works` (one row per publication, reusing `unique_publications`, so OpenAlex wins a shared DOI and DOI-less records stay individually traceable) and `works_by_year_source` (`publications`, `total_citations`, `open_access_publications`). Each table is staged in a temporary directory and swapped in, so readers never see a partial table. `run_pipeline` rebuilds Gold only when new Silver batches were processed or Gold does not exist yet.
-
 ## Year-stratified ingestion
 
 Both sources ingest the same year range with an initial target (`INGEST_INITIAL_TARGET`, 100,000 per source) split across years in proportion to each year's real volume, so recent years are not starved by early ones. Year volumes come from one OpenAlex `group_by` request and one single-record Scopus request per year; the resulting plan is stored in `bronze/plans/<source>.json` and reused while the query or filter, range and target are unchanged. OpenAlex runs one filter lineage per year (`publication_year:Y`), so cursors never mix. Within a year, the order of records follows each API's own order, which is not random. Document type and topical filtering belong to Silver, which is why ingestion takes everything the AI expression matches.

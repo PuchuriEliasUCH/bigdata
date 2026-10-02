@@ -7,7 +7,6 @@ Use las variables de entorno para configurar rutas, credenciales y selección de
 | Variable | Uso / valor predeterminado conocido |
 |---|---|
 | `OPENALEX_TOKEN` | Credencial de OpenAlex |
-| `GOLD_PATH` | Opcional. Carpeta de la capa Gold (predeterminado `/data/gold`) |
 | `OPENALEX_FILTER` | Opcional. Si no se define, OpenAlex usa la definición de IA de `src/search_criteria.py`; `none` desactiva el filtro |
 | `SCOPUS_API` | API key de Scopus |
 | `SCOPUS_QUERY` | Consulta que habilita Scopus; vacía significa omitirla |
