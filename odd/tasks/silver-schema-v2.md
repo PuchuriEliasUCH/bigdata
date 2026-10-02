@@ -34,5 +34,9 @@ Scopus entry (STANDARD view): dc:creator is only the first author ("Shalko M.");
 Consequence: country is kept honestly per source (country_codes from OpenAlex, country_names from Scopus) instead of inventing a name-to-ISO mapping; reconciling them is a later step.
 Decision: missing topics no longer rejects an OpenAlex record; it becomes the has_topics flag, as approved (flags never reject).
 
+Real bounded run of Silver v3 (3 cycles, 2024-2025, target 3000, compaction threshold 2): all 31 expected columns present, schema_version 3 on every row. Fill rates, OpenAlex (1,203 rows): abstract 85%, language 100%, venue 89%, authors 99%, institutions 97%, country_codes 96%, topics 100%, keywords 100%, counts_by_year 100%. Scopus (1,302 rows): abstract 0%, authors 100% (first author only), institutions 99%, country_names 99%, is_oa filled. Timings: cycle 99.8 s and 116.9 s; the second spent 85.7 s ingesting and 30.2 s on Spark plus compaction (Spark budget is 25 s but a batch already started cannot be cut), leaving about 3 s of margin in the two-minute cycle.
+Bug found by the real run and fixed (regression test added, 131 tests pass): cross-batch dedup listed previous Silver paths only for batches created before the current one, so a compacted group containing a later batch left the pruned originals in the list and Spark raised PATH_NOT_FOUND on every following run. Dedup now compares against every completed Silver batch regardless of creation order.
+Observations for later: Scopus work_type includes Retracted and Erratum records (type filtering belongs to the Silver filtering step) while is_retracted stays null for Scopus; it could be derived from the subtype.
+
 ## Next step
 Validate the new Silver with a real bounded run (needs user authorization), then start the real ingestion.

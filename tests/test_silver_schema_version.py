@@ -79,3 +79,22 @@ def test_an_expired_deadline_still_makes_progress_and_reports_what_is_pending(sp
     assert len(first.processed_batches) == 1 and first.pending_batches == 2
     second = process_pending_batches(spark, bronze, silver)
     assert len(second.processed_batches) == 2 and second.pending_batches == 0
+
+
+def test_a_batch_processed_after_its_neighbours_were_compacted_still_dedups_against_them(spark, tmp_path):
+    from src.compaction import compact_batches, prune_compacted_originals
+
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    _bronze_batch(bronze, "b1", ["W1"])
+    _bronze_batch(bronze, "b3", ["W3"])
+    process_pending_batches(spark, bronze, silver)
+    # The group holds b1 and b3, so b2 (created in between) is processed after its originals are pruned.
+    compact_batches(spark, silver, ["b1", "b3"], group="openalex-2024-0001")
+    prune_compacted_originals(spark, silver, "openalex-2024-0001")
+    _bronze_batch(bronze, "b2", ["W2", "W1"])
+    summary = process_pending_batches(spark, bronze, silver)
+    assert summary.processed_batches == ("b2",)
+    kept = [row["source_id"] for row in spark.read.parquet(str(silver / "works" / "b2")).collect()]
+    rejected = spark.read.parquet(str(silver / "rejected" / "b2")).collect()
+    assert kept == ["W2"]
+    assert [row["rejection_reason"] for row in rejected] == ["duplicate_source_id_previous_batch"]

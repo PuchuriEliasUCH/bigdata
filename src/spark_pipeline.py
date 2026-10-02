@@ -399,10 +399,20 @@ def process_pending_batches(
     skipped: list[str] = []
     valid_rows = 0
     rejected_rows = 0
-    completed_silver_paths: list[Path] = []
     pending = 0
     with _processing_lock(silver_path):
         rebuilt = _ensure_schema_version(bronze_path, silver_path)
+        # Deduplicate against everything already in Silver, whatever the batch order: a
+        # compacted group may hold batches created after the one being processed, and its
+        # originals no longer exist once pruned.
+        completed_silver_paths = []
+        for state_file in sorted((silver_path / "_processing").glob("*.json")):
+            try:
+                finished = json.loads(state_file.read_text(encoding="utf-8")).get("status") == "completed"
+            except (OSError, ValueError):
+                finished = False
+            if finished:
+                completed_silver_paths.append(silver_path / "works" / state_file.stem)
         for metadata in _completed_metadata(bronze_path):
             batch_id = str(metadata["batch_id"])
             state_path = _processing_state_path(silver_path, batch_id)
@@ -413,7 +423,6 @@ def process_pending_batches(
                     raise ProcessingError(f"Unable to read processing state for {batch_id}") from exc
                 if state.get("status") == "completed":
                     skipped.append(batch_id)
-                    completed_silver_paths.append(silver_path / "works" / batch_id)
                     continue
 
             if deadline is not None and processed and time.monotonic() >= deadline:
@@ -436,7 +445,7 @@ def process_pending_batches(
                     bronze_path,
                     silver_path,
                     metadata,
-                    tuple(resolve_completed_paths(silver_path, completed_silver_paths)),
+                    tuple(resolve_completed_paths(silver_path, [path for path in completed_silver_paths if path.name != batch_id])),
                 )
             except Exception as exc:
                 _write_json_atomic(
