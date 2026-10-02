@@ -401,3 +401,34 @@ def test_empty_windows_do_not_consume_the_year_quota(tmp_path):
         initial_target_records=6,
     )
     assert sorted(ingested_eids(tmp_path)) == sorted(eid for eid, _, _ in corpus)
+
+
+def test_scopus_time_budget_pauses_and_the_next_run_resumes_without_duplicates(tmp_path, clock):
+    class Ticking(CorpusSession):
+        def get(self, url, *, params, headers, timeout):
+            clock.now += 1
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+
+    session = Ticking([(f"e{i}", 2020, 20200101 + i) for i in range(6)])
+    options = dict(query="PUBYEAR = 2020", target_records=6, page_size=2, requests_per_second=0)
+    paused = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), deadline=clock.now + 1.5, **options)
+    assert paused.status == "time_budget_reached" and 0 < paused.records < 6
+    done = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), **options)
+    assert done.status == "completed_target"
+    eids = ingested_eids(tmp_path)
+    assert sorted(eids) == sorted(f"e{i}" for i in range(6))
+
+
+def test_scopus_years_stop_the_whole_run_when_the_time_budget_is_spent(tmp_path, clock):
+    class Ticking(CorpusSession):
+        def get(self, url, *, params, headers, timeout):
+            clock.now += 1
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+
+    session = Ticking(_yearly_corpus())
+    options = _yearly_options(session)
+    summaries = run_scopus_years(tmp_path, deadline=clock.now + 2.5, **options)
+    assert summaries[-1].status == "time_budget_reached"
+    assert _count_by_year(tmp_path)[1] == 0
+    run_scopus_years(tmp_path, **options)
+    assert _count_by_year(tmp_path) == (3, 2)

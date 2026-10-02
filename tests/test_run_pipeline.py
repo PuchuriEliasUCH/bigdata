@@ -12,7 +12,7 @@ from src.openalex_ingest import OpenAlexRequestError
 def isolated_environment(tmp_path, monkeypatch):
     """Keep container .env values from reaching real APIs and point every zone at tmp_path."""
     for name in ("SCOPUS_QUERY", "SCOPUS_API", "INGEST_FIRST_YEAR", "INGEST_LAST_YEAR",
-                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES"):
+                 "INGEST_INITIAL_TARGET", "INCREMENTAL_LIMIT", "COMPACT_MIN_BATCHES", "INGEST_TIME_BUDGET_SECONDS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BRONZE_PATH", str(tmp_path / "bronze"))
     monkeypatch.setenv("SILVER_PATH", str(tmp_path / "silver"))
@@ -51,7 +51,7 @@ def test_scheduler_runs_both_sources_with_the_default_2011_to_current_year_range
     monkeypatch.setattr(pipeline, "ingest_scopus", lambda root, **kw: seen.setdefault("scopus", kw) and [scopus_summary("quota_exceeded")])
     pipeline.main()
     year = datetime.now(timezone.utc).year
-    shared = {"first_year": 2011, "last_year": year, "initial_target": 100_000, "incremental_limit": 1000}
+    shared = {"first_year": 2011, "last_year": year, "initial_target": 100_000, "incremental_limit": 3000, "time_budget": 15.0}
     assert seen["openalex"] == shared
     assert seen["scopus"] == {"query": "TITLE(test)", **shared}
     report = json.loads(capsys.readouterr().out)
@@ -62,11 +62,13 @@ def test_scheduler_runs_both_sources_with_the_default_2011_to_current_year_range
 def test_environment_overrides_range_and_budgets(monkeypatch):
     seen = {}
     for name, value in {"INGEST_FIRST_YEAR": "2015", "INGEST_LAST_YEAR": "2020",
-                        "INGEST_INITIAL_TARGET": "500", "INCREMENTAL_LIMIT": "50"}.items():
+                        "INGEST_INITIAL_TARGET": "500", "INCREMENTAL_LIMIT": "50",
+                        "INGEST_TIME_BUDGET_SECONDS": "20"}.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(pipeline, "ingest_openalex", lambda root, **kw: seen.update(kw) or [openalex_summary()])
     pipeline.main()
-    assert seen == {"first_year": 2015, "last_year": 2020, "initial_target": 500, "incremental_limit": 50}
+    # Without a Scopus query OpenAlex is the only source, so it gets the whole budget.
+    assert seen == {"first_year": 2015, "last_year": 2020, "initial_target": 500, "incremental_limit": 50, "time_budget": 20.0}
 
 
 def test_scopus_is_skipped_without_a_configured_query(monkeypatch, capsys):

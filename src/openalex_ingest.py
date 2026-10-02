@@ -315,6 +315,7 @@ def _run_ingestion(
     initial_target_records: int,
     incremental_limit: int,
     page_size: int,
+    deadline: float | None = None,
 ) -> IngestionSummary:
     if initial_target_records < 1:
         raise IngestionError("Initial target must be positive")
@@ -330,7 +331,7 @@ def _run_ingestion(
         record for record in store.list_metadata()
         if record.get("source", "openalex") == "openalex" and record.get("filter", "") == active_filter
     ]
-    running = [record for record in metadata_records if record.get("status") in {"running", "transient_error", "rate_limited"}]
+    running = [record for record in metadata_records if record.get("status") in {"running", "transient_error", "rate_limited", "time_budget_reached"}]
     if len(running) > 1:
         raise BatchStateError("Multiple running batches cannot be resumed safely")
 
@@ -386,6 +387,12 @@ def _run_ingestion(
     while record_count < target_records:
         if not cursor:
             break
+        if deadline is not None and time.monotonic() >= deadline:
+            # Pause rather than finish: the batch resumes from its saved cursor next run
+            # and only reaches Silver once complete, so a time cut never fragments data.
+            metadata.update(status="time_budget_reached", stop_reason="time_budget_reached", updated_at=utc_now())
+            path = store.write_metadata(metadata)
+            return IngestionSummary(metadata["batch_id"], mode, "time_budget_reached", page_count, record_count, path)
 
         remaining = target_records - record_count
         request_size = min(page_size, remaining, DEFAULT_PAGE_SIZE)
@@ -471,6 +478,7 @@ def run_ingestion(
     initial_target_records: int = DEFAULT_INITIAL_TARGET,
     incremental_limit: int = DEFAULT_INCREMENTAL_LIMIT,
     page_size: int = DEFAULT_PAGE_SIZE,
+    deadline: float | None = None,
 ) -> IngestionSummary:
     """Run one recoverable batch, selecting initial or incremental mode safely."""
 
@@ -483,6 +491,7 @@ def run_ingestion(
             initial_target_records=initial_target_records,
             incremental_limit=incremental_limit,
             page_size=page_size,
+            deadline=deadline,
         )
 
 
@@ -496,6 +505,7 @@ def run_openalex_years(
     year_totals: dict[int, int],
     incremental_limit: int = DEFAULT_INCREMENTAL_LIMIT,
     page_size: int = DEFAULT_PAGE_SIZE,
+    deadline: float | None = None,
 ) -> list[IngestionSummary]:
     """Fill each year's initial quota, then grow the least filled year first.
 
@@ -536,8 +546,10 @@ def run_openalex_years(
         for year in pending:
             summaries.append(run_ingestion(
                 bronze_root, client=clients[year], initial_target_records=year_quotas[year],
-                incremental_limit=incremental_limit, page_size=page_size,
+                incremental_limit=incremental_limit, page_size=page_size, deadline=deadline,
             ))
+            if summaries[-1].status == "time_budget_reached":
+                break
         return summaries
     budget = incremental_limit
     for year in sorted(clients, key=fill_ratio):
@@ -545,8 +557,10 @@ def run_openalex_years(
             break
         summary = run_ingestion(
             bronze_root, client=clients[year], initial_target_records=year_quotas[year],
-            incremental_limit=budget, page_size=page_size,
+            incremental_limit=budget, page_size=page_size, deadline=deadline,
         )
         budget -= summary.records
         summaries.append(summary)
+        if summary.status == "time_budget_reached":
+            break
     return summaries

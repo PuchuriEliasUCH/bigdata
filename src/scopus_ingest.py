@@ -100,6 +100,7 @@ def run_scopus_ingestion(
     max_retries: int = 2,
     split_oversized: bool = False,
     base_query: str | None = None,
+    deadline: float | None = None,
 ) -> ScopusSummary:
     if not query or (target_records is not None and target_records < 1) or initial_target_records < 1 or not 1 <= page_size <= 200 or result_window < 1 or max_retries < 0:
         raise IngestionError("Invalid Scopus query or pagination settings")
@@ -133,6 +134,10 @@ def run_scopus_ingestion(
                 pass
         last_request = 0.0
         while metadata["record_count"] < metadata["target_records"]:
+            if deadline is not None and time.monotonic() >= deadline:
+                # Resumable pause: the batch is not terminal, so the next run continues it.
+                metadata["status"] = "time_budget_reached"
+                break
             offset = metadata["next_offset"]
             if offset >= result_window:
                 metadata["status"] = "result_window_reached"

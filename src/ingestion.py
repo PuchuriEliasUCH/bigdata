@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ def ingest_openalex(
     initial_target: int,
     incremental_limit: int,
     page_size: int = DEFAULT_PAGE_SIZE,
+    time_budget: float | None = None,
 ) -> list[IngestionSummary]:
     client = OpenAlexClient.from_environment()
     key = {"source": "openalex", "filter": client.filter_expression, "first_year": first_year,
@@ -34,6 +36,7 @@ def ingest_openalex(
     return run_openalex_years(
         bronze_root, client=client, first_year=first_year, last_year=last_year,
         year_quotas=quotas, year_totals=totals, incremental_limit=incremental_limit, page_size=page_size,
+        deadline=time.monotonic() + time_budget if time_budget else None,
     )
 
 
@@ -45,6 +48,7 @@ def ingest_scopus(
     last_year: int,
     initial_target: int,
     incremental_limit: int,
+    time_budget: float | None = None,
     **options: Any,
 ) -> list[ScopusSummary]:
     client = ScopusClient.from_environment()
@@ -57,5 +61,6 @@ def ingest_scopus(
     return run_scopus_years(
         bronze_root, query=query, first_year=first_year, last_year=last_year, client=client,
         initial_target_records=initial_target, incremental_limit=incremental_limit,
-        year_quotas=quotas, year_totals=totals, **options,
+        year_quotas=quotas, year_totals=totals,
+        deadline=time.monotonic() + time_budget if time_budget else None, **options,
     )

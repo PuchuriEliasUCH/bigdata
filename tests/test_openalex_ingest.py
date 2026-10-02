@@ -486,3 +486,39 @@ def test_openalex_incremental_serves_the_least_filled_year_first(tmp_path):
     assert _by_year(tmp_path / "bronze") == (3, 4)
     run_openalex_years(tmp_path / "bronze", incremental_limit=2, **_year_options(session))
     assert _by_year(tmp_path / "bronze") == (5, 4)
+
+
+def test_time_budget_pauses_a_batch_and_the_next_run_resumes_without_duplicates(tmp_path, clock):
+    class Ticking(YearSession):
+        def get(self, url, *, params, timeout):
+            clock.now += 1
+            return super().get(url, params=params, timeout=timeout)
+
+    session = Ticking({2020: 10})
+    client = OpenAlexClient("unit-test-token", session=session).for_year(2020)
+    options = dict(client=client, initial_target_records=10, page_size=2)
+    paused = run_ingestion(tmp_path / "bronze", deadline=clock.now + 3.5, **options)
+    assert paused.status == "time_budget_reached" and 0 < paused.records < 10
+    done = run_ingestion(tmp_path / "bronze", **options)
+    assert done.status == "completed_target" and done.records == 10
+    ids = _ingested_ids(tmp_path / "bronze")
+    assert len(ids) == len(set(ids)) == 10
+
+
+def test_time_budget_stops_before_the_next_year_and_the_next_run_continues(tmp_path, clock):
+    from src.openalex_ingest import run_openalex_years
+
+    class Ticking(YearSession):
+        def get(self, url, *, params, timeout):
+            clock.now += 1
+            return super().get(url, params=params, timeout=timeout)
+
+    session = Ticking({2020: 10, 2021: 10})
+    options = dict(first_year=2020, last_year=2021, year_quotas={2020: 4, 2021: 4},
+                   year_totals={2020: 10, 2021: 10}, page_size=2)
+    first = run_openalex_years(tmp_path / "bronze", client=OpenAlexClient("unit-test-token", session=session),
+                               deadline=clock.now + 2.5, **options)
+    assert first[-1].status == "time_budget_reached"
+    assert _by_year(tmp_path / "bronze")[1] == 0
+    run_openalex_years(tmp_path / "bronze", client=OpenAlexClient("unit-test-token", session=session), **options)
+    assert _by_year(tmp_path / "bronze") == (4, 4)

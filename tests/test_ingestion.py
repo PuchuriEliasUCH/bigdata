@@ -94,3 +94,19 @@ def test_scopus_plan_failure_is_sanitized_and_does_not_start_ingestion(tmp_path,
                                 incremental_limit=2, requests_per_second=0)
     assert "secret" not in str(error.value) and "403" in str(error.value)
     assert not (tmp_path / "scopus").exists()
+
+
+def test_time_budget_is_a_deadline_counted_after_planning(tmp_path, monkeypatch, clock):
+    session = OpenAlexYears({2020: 30})
+
+    class Ticking(OpenAlexYears):
+        def get(self, url, *, params, timeout):
+            clock.now += 1
+            return super().get(url, params=params, timeout=timeout)
+
+    session = Ticking({2020: 30})
+    monkeypatch.setattr(ingestion.OpenAlexClient, "from_environment", classmethod(lambda cls: OpenAlexClient("t", session=session)))
+    summaries = ingestion.ingest_openalex(tmp_path, first_year=2020, last_year=2020, initial_target=20,
+                                          incremental_limit=5, page_size=2, time_budget=3.5)
+    assert summaries[-1].status == "time_budget_reached"
+    assert len([call for call in session.calls if "group_by" in call]) == 1

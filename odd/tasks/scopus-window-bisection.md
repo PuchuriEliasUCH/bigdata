@@ -47,6 +47,8 @@ Engram: `mem_save` and `mem_session_start` failed at 2026-10-02 with "Claude hos
 
 Real bounded read test (2024-2025, target 200, temp dir inside the container): pipeline_complete, 398 valid + 2 rejected Silver rows, quotas respected. It exposed a defect: empty Scopus windows were stored as one phantom record (record_count 1) and consumed quota; fixed in the commit after 24c4f04 (97 tests pass). Open item: Silver creates one folder per Scopus window (6 for 200 records), so compaction or batch merging is needed before the 100k load.
 
+Compaction (068063e): compact_pending publishes immutable groups per source and year by threshold (COMPACT_MIN_BATCHES=10), compacts rejected rows, prunes originals after validation. Time budget: INGEST_TIME_BUDGET_SECONDS=30 shared by active sources, batches pause as time_budget_reached and resume next run (no Silver fragmentation); INCREMENTAL_LIMIT=3000 is only a cap. 111 tests pass.
+
 ## Next step
 1. Real bounded read test (2024-2025, INGEST_INITIAL_TARGET=200, temporary folder), authorized by the user.
 2. Design the Silver schema (enrich OpenAlex fields) and decide the role of Scopus.

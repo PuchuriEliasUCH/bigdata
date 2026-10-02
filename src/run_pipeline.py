@@ -18,6 +18,7 @@ from src.spark_pipeline import process_pending_batches
 COMPLETE = {"completed", "completed_target", "completed_exhausted"}
 SCOPUS_SETTLED = {"completed_target", "completed_exhausted", "result_window_reached"}
 DEFAULT_FIRST_YEAR = 2011
+DEFAULT_TIME_BUDGET_SECONDS = 30.0
 
 
 def _overall(statuses: list[str], settled: set[str]) -> str | None:
@@ -29,18 +30,23 @@ def main() -> None:
     bronze_root = Path(os.environ.get("BRONZE_PATH", "/data/bronze"))
     silver_root = Path(os.environ.get("SILVER_PATH", "/data/silver"))
     # One year range and one budget for both sources keeps their samples comparable.
+    scopus_query = os.environ.get("SCOPUS_QUERY", "").strip()
+    # The scheduler runs every minute: ingestion gets a fixed slice of it, shared by
+    # the active sources, so Spark and compaction always fit before the next run.
+    total_budget = float(os.environ.get("INGEST_TIME_BUDGET_SECONDS") or DEFAULT_TIME_BUDGET_SECONDS)
     shared = {
         "first_year": int(os.environ.get("INGEST_FIRST_YEAR") or DEFAULT_FIRST_YEAR),
         "last_year": int(os.environ.get("INGEST_LAST_YEAR") or datetime.now(timezone.utc).year),
         "initial_target": int(os.environ.get("INGEST_INITIAL_TARGET") or 100_000),
-        "incremental_limit": int(os.environ.get("INCREMENTAL_LIMIT") or 1000),
+        # With a time budget this is only a safety cap on records per run.
+        "incremental_limit": int(os.environ.get("INCREMENTAL_LIMIT") or 3000),
+        "time_budget": total_budget / (2 if scopus_query else 1),
     }
     try:
         openalex = ingest_openalex(bronze_root, **shared)
         openalex_status = _overall([summary.status for summary in openalex], COMPLETE) or "completed"
     except OpenAlexRequestError as exc:
         openalex, openalex_status = [], exc.status
-    scopus_query = os.environ.get("SCOPUS_QUERY", "").strip()
     scopus: list = []
     scopus_status = None
     if scopus_query:

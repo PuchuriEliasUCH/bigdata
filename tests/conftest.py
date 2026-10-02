@@ -18,3 +18,19 @@ def spark():
     )
     yield session
     session.stop()
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Deterministic time.monotonic: tests advance it explicitly instead of sleeping."""
+    import time
+
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    fake = Clock()
+    monkeypatch.setattr(time, "monotonic", fake)
+    return fake

@@ -13,7 +13,8 @@ Use las variables de entorno para configurar rutas, credenciales y selección de
 | `INGEST_FIRST_YEAR`, `INGEST_LAST_YEAR` | Rango de años de ambas fuentes (predeterminado 2011 hasta el año actual) |
 | `INGEST_INITIAL_TARGET` | Registros de la carga inicial por fuente, repartidos por año (predeterminado 100 000) |
 | `COMPACT_MIN_BATCHES` | Lotes sin compactar de una fuente y año a partir de los cuales se compactan (predeterminado 10) |
-| `INCREMENTAL_LIMIT` | Registros por corrida en la fase incremental (predeterminado 1 000) |
+| `INGEST_TIME_BUDGET_SECONDS` | Tiempo total de ingesta por corrida, repartido entre las fuentes activas (predeterminado 30 s de los 60 s del ciclo) |
+| `INCREMENTAL_LIMIT` | Tope de seguridad de registros por corrida en la fase incremental (predeterminado 3 000) |
 | `BRONZE_PATH` | `/data/bronze` en Compose |
 | `SILVER_PATH` | `/data/silver` en Compose |
 | `SPARK_MASTER` | `local[*]` si no se configura |
