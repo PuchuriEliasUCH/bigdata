@@ -13,7 +13,7 @@ Spark convierte los lotes Bronze completados en Parquet Silver, conserva aparte 
 | Año de publicación o fecha | Sí | Sí |
 | Al menos un ID o nombre de tema | Sí | No |
 
-Scopus no aporta temas mapeados en este pipeline, por lo que la regla de temas no se le aplica. Los registros rechazados conservan motivos auditables y el subconjunto crudo correspondiente se escribe en `bronze/rejected/<batch-id>`.
+Scopus no aporta temas mapeados en este pipeline, por lo que la regla de temas no se le aplica. Los registros rechazados conservan motivos auditables y el subconjunto crudo correspondiente se escribe en `silver/rejected/<batch-id>`.
 
 ## Duplicados
 
@@ -23,7 +23,7 @@ El primer registro válido según `record_order` se conserva de forma determinis
 
 - `silver/works/<batch-id>`: registros aceptados en Parquet con compresión Snappy.
 - `silver/_processing`: estado de procesamiento por lote; los lotes ya completados se omiten en ejecuciones posteriores.
-- `bronze/rejected/<batch-id>`: subconjunto de entrada rechazado y evidencia de motivos.
+- `silver/rejected/<batch-id>`: registros rechazados, con `record_json` (el registro original) y `rejection_reason`.
 
 Los originales permanecen en Bronze. No se debe confundir el flujo de filtrado con una política de limpieza o eliminación.
 

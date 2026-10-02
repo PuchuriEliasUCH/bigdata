@@ -82,7 +82,7 @@ def test_processing_validates_normalizes_deduplicates_and_rejects(spark, tmp_pat
     assert valid_rows[0]["publication_year"] == 2024
     assert valid_rows[0]["topic_names"] == ["Data Engineering"]
 
-    rejected_rows = spark.read.parquet(str(bronze_root / "rejected" / "initial-test")).collect()
+    rejected_rows = spark.read.parquet(str(silver_root / "rejected" / "initial-test")).collect()
     reasons = {row["rejection_reason"] for row in rejected_rows}
     assert len(rejected_rows) == 3
     assert "duplicate_openalex_id" in reasons
@@ -198,10 +198,10 @@ def test_previous_batch_duplicate_is_rejected_without_using_invalid_ids(spark, t
         "https://openalex.org/W21"
     ]
 
-    first_rejected = spark.read.parquet(str(bronze_root / "rejected" / "batch-001")).collect()
+    first_rejected = spark.read.parquet(str(silver_root / "rejected" / "batch-001")).collect()
     assert len(first_rejected) == 1
     assert "missing_title" in first_rejected[0]["rejection_reason"]
-    second_rejected = spark.read.parquet(str(bronze_root / "rejected" / "batch-002")).collect()
+    second_rejected = spark.read.parquet(str(silver_root / "rejected" / "batch-002")).collect()
     assert len(second_rejected) == 1
     assert second_rejected[0]["openalex_id"] == "https://openalex.org/W20"
     assert second_rejected[0]["rejection_reason"] == "duplicate_openalex_id_previous_batch"

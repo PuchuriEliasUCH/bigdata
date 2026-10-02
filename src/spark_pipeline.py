@@ -384,7 +384,7 @@ def _process_one_batch(
     valid = validated.filter(F.col("rejection_reason") == "")
 
     # Keep the first occurrence deterministic and make later duplicates visible
-    # in Bronze rejected rather than silently losing audit evidence.
+    # in Silver rejected rather than silently losing audit evidence.
     first_record_orders = valid.groupBy("openalex_id").agg(
         F.min("record_order").alias("_first_record_order")
     )
@@ -428,7 +428,7 @@ def _process_one_batch(
 
     processed_at = datetime.now(timezone.utc).isoformat()
     silver_path = silver_root / "works" / batch_id
-    rejected_path = bronze_root / "rejected" / batch_id
+    rejected_path = silver_root / "rejected" / batch_id
     (
         _silver_columns(accepted, processed_at, source).repartition(output_partitions(int(metadata.get("record_count", 0))))
         .write.mode("overwrite")

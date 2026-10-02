@@ -12,7 +12,7 @@ Scopus (solo si hay consulta) ──┴─> Bronze: páginas Parquet + metadatos
                                   Spark local
                          validar · deduplicar · tipar
                             /                 \
-          Bronze/rejected/<lote>       Silver/works/<lote> (Parquet)
+          Silver/rejected/<lote>       Silver/works/<lote> (Parquet)
                                              + _processing
 ```
 

@@ -63,7 +63,7 @@ src/spark_pipeline.py (validación, normalización y deduplicación)
        |                                      |
        v                                      v
 Rejected en Bronze:                    Silver Parquet:
- data/bronze/rejected/                 data/silver/works/<batch-id>/
+ data/silver/rejected/<batch-id>/       data/silver/works/<batch-id>/
  <batch-id>/part-*.json                part-*.parquet
               \                                      /
                v                                    v
@@ -117,10 +117,12 @@ El notebook usa `/data/bronze` y `/data/silver`, es de solo lectura, informa cua
 └── data/                                 # Salida persistida y local; ignorada por Git
     ├── bronze/
     │   ├── openalex/<batch-id>/
+    │   ├── scopus/<batch-id>/
     │   ├── batch_metadata/
-    │   └── rejected/<batch-id>/
+    │   └── plans/
     └── silver/
         ├── works/<batch-id>/
+        ├── rejected/<batch-id>/
         └── _processing/
 ```
 

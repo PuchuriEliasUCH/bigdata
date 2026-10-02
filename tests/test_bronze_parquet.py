@@ -45,9 +45,9 @@ def test_spark_reads_parquet_pages_and_writes_rejected_as_parquet(spark, tmp_pat
     _metadata(bronze, "p1", "openalex", 1, [str(page.relative_to(bronze))])
     summary = process_pending_batches(spark, bronze, silver)
     assert summary.valid_rows == 1 and summary.rejected_rows == 1
-    rejected = spark.read.parquet(str(bronze / "rejected" / "p1")).collect()
+    rejected = spark.read.parquet(str(silver / "rejected" / "p1")).collect()
     assert [row["openalex_id"] for row in rejected] == ["W2"]
-    assert not list((bronze / "rejected" / "p1").glob("part-*.json"))
+    assert not list((silver / "rejected" / "p1").glob("part-*.json"))
 
 
 def test_batch_with_legacy_json_page_and_new_parquet_page_keeps_record_order(spark, tmp_path):
