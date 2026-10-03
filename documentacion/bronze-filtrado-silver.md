@@ -4,7 +4,7 @@ Spark convierte los lotes Bronze completados en Parquet Silver, conserva aparte 
 
 ## Elegibilidad y validación
 
-`src/spark_pipeline.py` carga las páginas de Bronze, extrae las columnas de cada fuente (`src/silver_columns.py`) y aplica las reglas de rechazo (`src/silver_rules.py`, un solo módulo porque el filtrado va a cambiar). Solo considera lotes completos con al menos una página. Un registro se **rechaza** únicamente si no se puede identificar, titular o fechar:
+[Spark](../src/spark_pipeline.py) carga las páginas de Bronze, extrae las [columnas de cada fuente](../src/silver_columns.py) y aplica las [reglas de rechazo](../src/silver_rules.py). Solo considera lotes completos con al menos una página. Antes de deduplicar, un registro se **rechaza** si no se puede identificar, titular o fechar:
 
 | Regla de rechazo | Motivo |
 |---|---|
@@ -12,7 +12,7 @@ Spark convierte los lotes Bronze completados en Parquet Silver, conserva aparte 
 | Título vacío | `missing_title` |
 | Sin año de publicación ni fecha | `missing_publication_year_or_date` |
 
-Todo lo demás (sin tópicos, sin resumen, sin autores) **se conserva** y queda marcado en columnas de calidad (`has_abstract`, `has_topics`, etc.), para decidir el filtro final sin reprocesar Bronze. Los rechazados conservan el registro original y su motivo en `silver/rejected/<batch-id>`.
+La ausencia de tópicos, resumen, autores, idioma o tipo de publicación **no causa rechazo**. `has_abstract`, `has_topics` y `topic_count` permiten evaluar la cobertura sin reprocesar Bronze. Los rechazados conservan el registro original y su motivo en Parquet Silver bajo `silver/rejected/<batch-id>`, no en JSON Bronze.
 
 ## Duplicados
 
@@ -24,7 +24,11 @@ El primer registro válido según `record_order` se conserva de forma determinis
 - `silver/_processing`: estado de procesamiento por lote; los lotes ya completados se omiten en ejecuciones posteriores.
 - `silver/rejected/<batch-id>`: registros rechazados, con `record_json` (el registro original) y `rejection_reason`.
 
-Los originales permanecen en Bronze. No se debe confundir el flujo de filtrado con una política de limpieza o eliminación.
+Los originales permanecen en Bronze; la compactación automática sí puede podar las salidas Silver por lote.
+
+### Reconstrucción por versión
+
+`silver/_schema_version.json` registra la versión vigente (3). Si cambia o el marcador no indica la versión actual, se reconstruyen las salidas derivadas `works`, `rejected`, `_processing` y `_compact` desde Bronze. Antes de eliminarlas se comprueba que existan los metadatos Bronze de todos los lotes implicados, incluidos los del manifiesto. **No se valida previamente la integridad de todas las páginas crudas**: metadatos presentes no garantizan que la reconstrucción pueda leer todos los datos. El procesamiento puede continuar en varias ejecuciones según el presupuesto Silver.
 
 ## Columnas de Silver (versión 3 del esquema)
 
@@ -45,8 +49,12 @@ Notas:
 - `title` y `abstract` se limpian (etiquetas, espacios) y se normalizan a Unicode NFC.
 - `source_id` solo identifica un trabajo dentro de su fuente: no es una clave de enlace entre bases. Los motivos de rechazo son `missing_source_id`, `missing_title`, `missing_publication_year_or_date`, `duplicate_source_id` y `duplicate_source_id_previous_batch`.
 
-## Compactación opcional
+## Compactación automática y lectura activa
 
-`src/compaction.py` ofrece compactación opcional de lotes compatibles de una misma fuente. Publica Parquet versionado y un manifiesto atómico; los lectores deben resolver las rutas activas mediante `active_silver_paths` / `resolve_completed_paths`. La poda de archivos anteriores es una acción separada y destructiva: solo corresponde después de validar la compactación.
+El orquestador llama a [compact_pending](../src/compaction.py) después de Spark. Agrupa lotes completados aún no compactados por fuente y año; con al menos `COMPACT_MIN_BATCHES` (10 por defecto) publica generaciones Parquet bajo `silver/_compact/` y un manifiesto atómico `manifest.json`. Valida esquema y conteos aceptados, y conteos de rechazos cuando existen; después revalida la publicación y poda automáticamente los directorios originales `works/<batch-id>` y `rejected/<batch-id>`. Bronze se conserva.
+
+Los lectores deben usar **`active_silver_paths` para aceptados y `active_rejected_paths` para rechazos**: combinan generaciones publicadas con lotes aún no compactados. Leer solo `works/*` o `rejected/*` omite datos ya podados; sumar originales y generaciones puede duplicarlos si la poda quedó pendiente. `resolve_completed_paths` resuelve las generaciones para el procesamiento que conoce los lotes completados. `_processing` conserva la trazabilidad por lote.
 
 Para métricas opcionales por lote, `python -m src.metrics --bronze ... --silver ...` informa conteos, número/tamaño de archivos Parquet y tiempo de escritura.
+
+Continuar con [operación](operacion.md), revisar la [ingesta](ingesta.md) o volver al [índice](README.md).

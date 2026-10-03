@@ -15,9 +15,9 @@ Use las variables de entorno para configurar rutas, credenciales y selección de
 | `COMPACT_MIN_BATCHES` | Lotes sin compactar de una fuente y año a partir de los cuales se compactan (predeterminado 10) |
 | `INGEST_TIME_BUDGET_SECONDS` | Tiempo total de ingesta por corrida (predeterminado 70 s de los 120 s del ciclo) |
 | `INGEST_SCOPUS_SHARE` | Parte de ese tiempo para Scopus, la fuente más lenta (predeterminado 0,6); el resto es de OpenAlex |
-| `SCOPUS_REQUESTS_PER_SECOND` | Solicitudes por segundo a Scopus (predeterminado 5; Elsevier permite 9 por key) |
+| `SCOPUS_REQUESTS_PER_SECOND` | Solicitudes por segundo a Scopus: 5 en el orquestador, frente a 2 en el módulo |
 | `SILVER_TIME_BUDGET_SECONDS` | Después de este tiempo Spark no inicia lotes nuevos en la corrida (predeterminado 20 s); siempre procesa al menos uno |
-| `INCREMENTAL_LIMIT` | Tope de seguridad de registros por corrida en la fase incremental (predeterminado 6 000) |
+| `INCREMENTAL_LIMIT` | Tope de seguridad por fuente y corrida incremental: 6 000 en el orquestador, frente a 1 000 en los módulos |
 | `BRONZE_PATH` | `/data/bronze` en Compose |
 | `SILVER_PATH` | `/data/silver` en Compose |
 | `SPARK_MASTER` | `local[*]` si no se configura |
@@ -27,9 +27,9 @@ Compose monta `./data:/data` y el notebook como solo lectura. Los datos persiste
 
 ## Ejecución y resultado
 
-`src/run_pipeline.py` coordina OpenAlex, Scopus condicional y Spark local. Al final emite un evento JSON con conteos/estados. La ejecución puede terminar como parcial si OpenAlex falla o algún lote Scopus no se completa; consultar ese estado en lugar de asumir éxito por la existencia de archivos.
+El [orquestador](../src/run_pipeline.py) coordina OpenAlex primero, Scopus condicional, Spark local y compactación automática. Si alcanza el final, emite un evento JSON con conteos/estados. La ejecución puede terminar como parcial si OpenAlex falla o algún lote Scopus no se completa; consultar ese estado en lugar de asumir éxito por la existencia de archivos. Algunos errores, como los de transporte durante conteos anuales Scopus, pueden impedir el evento final.
 
-La tarea de `scheduler/pipeline.cron` se ejecuta cada dos minutos (`*/2 * * * *`): unos 70 s de ingesta más Spark y compactación (hasta unos 50 s). El reporte de cada corrida incluye `ingestion_seconds` y `silver_seconds` para vigilar que el ciclo siga cabiendo en esos dos minutos.
+La tarea de [pipeline.cron](../scheduler/pipeline.cron) se ejecuta cada dos minutos (`*/2 * * * *`). Los 70 s de ingesta se reparten en 28 s OpenAlex y 42 s Scopus cuando ambas fuentes están activas; de lo contrario OpenAlex recibe 70 s. Spark dispone de 20 s para dejar de iniciar nuevos lotes, pero procesa al menos uno si hay pendientes y no interrumpe el lote en curso. La compactación posterior puede exceder ese presupuesto. **No existe un límite duro de 120 s ni garantía de ausencia de solapamiento por estos presupuestos**. El reporte incluye `ingestion_seconds` y `silver_seconds` (incluye compactación y cierre Spark) para observar la duración real.
 
 ## Rutas de datos
 
@@ -37,9 +37,13 @@ La tarea de `scheduler/pipeline.cron` se ejecuta cada dos minutos (`*/2 * * * *`
 data/bronze/openalex/<batch-id>/       páginas Parquet OpenAlex
 data/bronze/scopus/<batch-id>/         páginas Parquet Scopus
 data/bronze/batch_metadata/            estado compartido de lotes
-data/silver/rejected/<batch-id>/       registros rechazados
+data/bronze/plans/<fuente>.json        planes de cuotas anuales
+data/silver/rejected/<batch-id>/       Parquet de rechazos (Snappy)
 data/silver/works/<batch-id>/          Parquet aceptado (Snappy)
-data/silver/_processing/               estado de procesamiento
+data/silver/_processing/              estado de procesamiento por lote
+data/silver/_schema_version.json      marcador de versión Silver
+data/silver/_compact/manifest.json    rutas publicadas y lotes sustituidos
+data/silver/_compact/<generación>/    Parquet compactado aceptado o rechazado
 ```
 
 Las rutas dentro del contenedor usan `/data/bronze` y `/data/silver`. No inspeccionar ni publicar páginas crudas sin autorización: pueden contener datos de gran tamaño o sensibles.
@@ -47,17 +51,17 @@ Las rutas dentro del contenedor usan `/data/bronze` y `/data/silver`. No inspecc
 ## Comprobaciones útiles
 
 1. Revisar que las credenciales requeridas estén configuradas sin imprimir sus valores.
-2. Confirmar si `SCOPUS_QUERY` está presente y si se definieron ambos años para particionar.
+2. Confirmar si `SCOPUS_QUERY` está presente y revisar el rango efectivo `INGEST_FIRST_YEAR`–`INGEST_LAST_YEAR`, cuyos valores predeterminados son 2011 y el año actual UTC.
 3. Comparar estado/conteos JSON de la ejecución con los lotes completos en `batch_metadata`.
-4. Verificar salidas Silver y rechazos por lote; lotes ya procesados se omiten mediante `_processing`.
-5. Tras compactar, validar manifiesto y rutas activas antes de considerar cualquier poda.
+4. Verificar `silver_schema_version`, `silver_rebuilt` y `silver_pending_batches`; `_processing` permite omitir lotes completados.
+5. Consultar `compacted_groups` y `compaction_skipped`; leer aceptados con `active_silver_paths` y rechazos con `active_rejected_paths`, no solo directorios por lote. La poda validada ya forma parte de la compactación automática.
 
 El [índice](README.md) enlaza el recorrido general; ver también [ingesta](ingesta.md) y [filtrado/Silver](bronze-filtrado-silver.md).
 
 
-## Carga inicial continua (una sola vez)
+## Carga inicial con presupuesto ampliado
 
-El cron limita cada corrida a `INGEST_TIME_BUDGET_SECONDS` (70 s) para no solaparse, así que la carga inicial de 100 000 registros por fuente se reparte en muchas corridas. Para hacerla de una sola vez, detené el servicio programado y lanzá una corrida con un presupuesto grande; después volvé al cron:
+Con el presupuesto habitual, la carga inicial de 100 000 registros por fuente se reparte entre varias ejecuciones. Para ampliar el tiempo disponible, detenga el servicio programado y lance una ejecución con un presupuesto mayor; después restaure el cron. Esto no garantiza completar toda la carga en una sola ejecución: depende del volumen, los límites y la conectividad.
 
 ```bash
 docker compose -f compose.yaml stop spark-pipeline
@@ -65,4 +69,6 @@ docker compose -f compose.yaml run --rm -e INGEST_TIME_BUDGET_SECONDS=86400 spar
 docker compose -f compose.yaml up -d
 ```
 
-El presupuesto se reparte entre las fuentes activas y cada una usa el suyo completo. Si la corrida se interrumpe, los lotes quedan guardados con su cursor y se retoman en la siguiente.
+El presupuesto se reparte entre las fuentes activas; cada fuente puede terminar antes de consumirlo. Si la ejecución se interrumpe, los checkpoints de cursor u offset permiten retomar el lote aplicable en la siguiente invocación. Los reintentos son acotados y no sustituyen un supervisor de conexión. Antes de una reconstrucción Silver, comprobar la disponibilidad de páginas Bronze además de sus metadatos: el control de versión solo exige estos últimos antes de eliminar salidas derivadas.
+
+Referencias de configuración: [Compose](../compose.yaml), [ingesta por años](../src/ingestion.py) y [compactación](../src/compaction.py).

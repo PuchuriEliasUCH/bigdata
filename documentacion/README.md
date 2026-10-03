@@ -13,10 +13,18 @@ Scopus (solo si hay consulta) ──┴─> Bronze: páginas Parquet + metadatos
                          validar · deduplicar · tipar
                             /                 \
           Silver/rejected/<lote>       Silver/works/<lote> (Parquet)
-                                             + _processing
+                                              + _processing
+                             \                 /
+                      compactación automática por fuente/año
+                     _compact: generaciones + manifiesto atómico
+                        │ valida y poda originales Silver
+                        v
+                lectores: active_silver_paths / active_rejected_paths
 ```
 
 El orquestador intenta OpenAlex primero. Scopus es condicional a `SCOPUS_QUERY`; no se debe interpretar que cada ejecución consulta necesariamente ambas fuentes. La carga a Silver procesa lotes terminados y aún no registrados como procesados.
+
+La carga inicial apunta a 100 000 registros por fuente, distribuidos proporcionalmente entre 2011 y el año actual UTC. Después, el límite incremental efectivo es 6 000 por fuente y ejecución. Los presupuestos de tiempo son orientativos, no un límite duro de duración. La compactación se activa con al menos diez lotes pendientes de una misma fuente y año; conserva Bronze, pero elimina los originales Silver después de validar la publicación.
 
 ## Documentos
 
@@ -26,4 +34,4 @@ El orquestador intenta OpenAlex primero. Scopus es condicional a `SCOPUS_QUERY`;
 
 ## Fuentes de implementación
 
-El recorrido se implementa principalmente en `src/run_pipeline.py`, `src/openalex_ingest.py`, `src/scopus_ingest.py` y `src/spark_pipeline.py`. La configuración de contenedores está en `compose.yaml` y la planificación en `scheduler/pipeline.cron`.
+El recorrido se implementa en el [orquestador](../src/run_pipeline.py), la [ingesta por años](../src/ingestion.py), los clientes [OpenAlex](../src/openalex_ingest.py) y [Scopus](../src/scopus_ingest.py), [Spark](../src/spark_pipeline.py) y la [compactación](../src/compaction.py). La configuración de contenedores está en [compose.yaml](../compose.yaml) y la planificación en [pipeline.cron](../scheduler/pipeline.cron).
