@@ -96,7 +96,7 @@ docker compose -f compose.yaml logs -f spark-pipeline
 docker compose -f compose.yaml exec spark-pipeline sh
 ```
 
-El notebook usa `/data/bronze` y `/data/silver`, es de solo lectura, informa cuando las zonas están vacías y nunca accede al token ni llama al API.
+El notebook usa `/data/bronze` y `/data/silver`, es de solo lectura, informa cuando las zonas están vacías y nunca accede al token ni llama al API. Muestra los lotes por fuente y estado, las páginas Parquet de Bronze, las ventanas de Scopus (`oversized` significa que la ventana se dividió), el procesamiento por lote, el perfil de Silver v3 (cobertura de abstract, tópicos, autores y países) y los rechazos, incluidos los grupos compactados.
 
 ## Estructura relevante
 
