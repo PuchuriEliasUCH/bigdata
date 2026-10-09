@@ -14,7 +14,7 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from src.spark_pipeline import ProcessingError, _completed_metadata, _processing_lock
+from src.spark_pipeline import PARQUET_WRITE_OPTIONS, ProcessingError, _completed_metadata, _processing_lock
 
 
 def _manifest_path(root: Path) -> Path:
@@ -116,7 +116,7 @@ def compact_batches(
             raise ProcessingError("Compaction group must contain one source")
         # Keep the complete rows: year may be null; do not silently drop them.
         target = root / "_compact" / f"{group}-{uuid.uuid4().hex}"
-        combined.coalesce(max(1, (original_count + 99_999) // 100_000)).write.option("compression", "snappy").parquet(str(target))
+        combined.coalesce(max(1, (original_count + 99_999) // 100_000)).write.options(**PARQUET_WRITE_OPTIONS).parquet(str(target))
         published = spark.read.parquet(str(target))
         if published.schema != schema or published.count() != original_count:
             raise ProcessingError("Compaction validation failed")
@@ -129,7 +129,7 @@ def compact_batches(
                 rejected = rejected.unionByName(frame)
             rejected_count = sum(frame.count() for frame in rejected_frames)
             rejected_target = root / "_compact" / f"{group}-rejected-{uuid.uuid4().hex}"
-            rejected.coalesce(1).write.option("compression", "snappy").parquet(str(rejected_target))
+            rejected.coalesce(1).write.options(**PARQUET_WRITE_OPTIONS).parquet(str(rejected_target))
             if spark.read.parquet(str(rejected_target)).count() != rejected_count:
                 raise ProcessingError("Rejected compaction validation failed")
             entry.update(rejected_path=str(rejected_target.relative_to(root)), rejected_rows=rejected_count)

@@ -34,6 +34,9 @@ from pyspark.sql.types import (
 # Bump when Silver's columns or rules change: the next run rebuilds Silver from Bronze.
 SILVER_SCHEMA_VERSION = 3
 
+# zstd level 9 roughly halves snappy's size on this data at an acceptable write cost.
+PARQUET_WRITE_OPTIONS = {"compression": "zstd", "parquet.compression.codec.zstd.level": "9"}
+
 
 class ProcessingError(RuntimeError):
     """Raised when a Bronze batch cannot be processed safely."""
@@ -331,10 +334,10 @@ def _process_one_batch(
     (
         normalize_unicode(_silver_columns(accepted, processed_at, source, metadata.get("created_at"))).repartition(output_partitions(int(metadata.get("record_count", 0))))
         .write.mode("overwrite")
-        .option("compression", "snappy")
+        .options(**PARQUET_WRITE_OPTIONS)
         .parquet(str(silver_path))
     )
-    rejected.write.mode("overwrite").option("compression", "snappy").parquet(str(rejected_path))
+    rejected.write.mode("overwrite").options(**PARQUET_WRITE_OPTIONS).parquet(str(rejected_path))
     return accepted.count(), rejected.count()
 
 

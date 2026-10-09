@@ -19,6 +19,18 @@ def _metadata(bronze, batch, source, pages, files):
         "raw_page_dir": f"{source}/{batch}", "raw_page_files": files, "created_at": "a"}))
 
 
+def _codecs(path):
+    files = [path] if path.is_file() else list(path.glob("*.parquet"))
+    metas = [pq.ParquetFile(file).metadata for file in files]
+    return {m.row_group(g).column(c).compression for m in metas for g in range(m.num_row_groups) for c in range(m.num_columns)}
+
+
+def test_raw_pages_are_compressed_with_zstd(tmp_path):
+    store = BatchStateStore(tmp_path, "openalex")
+    path = store.write_raw_page("b1", 1, {"results": [_work("W1")]})
+    assert _codecs(path) == {"ZSTD"}
+
+
 def test_raw_pages_are_stored_as_parquet_with_one_row_per_record(tmp_path):
     store = BatchStateStore(tmp_path, "openalex")
     path = store.write_raw_page("b1", 2, {"meta": {"next_cursor": "c"}, "results": [_work("W1"), _work("W2")]})
@@ -48,6 +60,8 @@ def test_spark_reads_parquet_pages_and_writes_rejected_as_parquet(spark, tmp_pat
     rejected = spark.read.parquet(str(silver / "rejected" / "p1")).collect()
     assert [row["source_id"] for row in rejected] == ["W2"]
     assert not list((silver / "rejected" / "p1").glob("part-*.json"))
+    assert _codecs(silver / "works" / "p1") == {"ZSTD"}
+    assert _codecs(silver / "rejected" / "p1") == {"ZSTD"}
 
 
 def test_batch_with_legacy_json_page_and_new_parquet_page_keeps_record_order(spark, tmp_path):

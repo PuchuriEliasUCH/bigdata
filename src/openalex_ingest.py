@@ -265,7 +265,7 @@ class BatchStateStore:
                 "record_json": pa.array([json.dumps(record, ensure_ascii=False) for record in records], pa.string()),
             }
         )
-        pq.write_table(table, temporary, compression="snappy")
+        pq.write_table(table, temporary, compression="zstd", compression_level=9)
         os.replace(temporary, target)
         return target
 
