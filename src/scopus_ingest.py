@@ -287,8 +287,14 @@ def run_scopus_years(
     summaries: list[ScopusSummary] = []
     terminal = {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}
 
+    cached_history: list[list[dict[str, Any]]] = []
+
     def scopus_history() -> list[dict[str, Any]]:
-        return [record for record in store.list_metadata() if record.get("source") == "scopus"]
+        # Re-reading every metadata file per window would spend the whole time budget
+        # walking already-split partitions; only an ingestion call changes the state.
+        if not cached_history:
+            cached_history.append([record for record in store.list_metadata() if record.get("source") == "scopus"])
+        return cached_history[0]
 
     def scoped(history: list[dict[str, Any]], base_query: str, modes: tuple[str, ...]) -> int:
         """Records already taken for one year, or for everything when there are no quotas."""
@@ -343,6 +349,7 @@ def run_scopus_years(
             summary = run_scopus_ingestion(bronze_root, query=partition_query, client=api,
                                            initial_target_records=batch_initial, target_records=batch_target,
                                            split_oversized=can_split, base_query=base_query, **options)
+            cached_history.clear()
             if summary.status == "oversized":
                 return "split"
             summaries.append(summary)

@@ -206,6 +206,28 @@ def test_year_partitions_share_one_initial_allocation(tmp_path):
     assert len(summaries) == 1
 
 
+def test_year_walk_reads_batch_metadata_once(tmp_path, monkeypatch):
+    from src.openalex_ingest import BatchStateStore
+
+    years = range(2011, 2016)
+    store = BatchStateStore(tmp_path, "scopus")
+    for year, query in zip(years, split_year_range("TITLE(test)", 2011, 2015)):
+        store.write_metadata({
+            "batch_id": f"scopus-{year}", "source": "scopus", "query": query, "base_query": query,
+            "mode": "initial", "status": "completed_exhausted", "record_count": 1, "next_offset": 1,
+            "total_results": 1, "created_at": f"{year}-01-01T00:00:00+00:00",
+        })
+    reads = []
+    original = BatchStateStore.list_metadata
+    monkeypatch.setattr(BatchStateStore, "list_metadata", lambda self: reads.append(1) or original(self))
+    run_scopus_years(
+        tmp_path, query="TITLE(test)", first_year=2011, last_year=2015,
+        client=ScopusClient("secret", session=Session([])), initial_target_records=1,
+        year_quotas={year: 1 for year in years},
+    )
+    assert len(reads) == 1
+
+
 def test_scopus_default_targets_are_distinct():
     import inspect
 
