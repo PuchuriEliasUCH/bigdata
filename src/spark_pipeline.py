@@ -259,14 +259,17 @@ def _processing_lock(silver_root: Path) -> Iterator[None]:
 # (resumable) batch waits until it turns terminal. Pages are written whole, so a batch
 # that stopped early still holds valid rows; overlap with a later batch that restarted
 # from an earlier cursor is caught by Silver's cross-batch deduplication.
+# "frozen" is set by src/freeze_batches.py once ingestion stops for good; no ingester
+# resumes it. A record without a source only enters with a completed status, because
+# a status such as quota_exceeded is terminal for one source and resumable for another.
 _COMPLETED_STATUSES = frozenset({"completed", "completed_target", "completed_exhausted"})
 TERMINAL_STATUSES = {
     # OpenAlex no longer writes quota_exceeded (low credits pause the batch instead);
     # batches written before that change were never resumed.
-    "openalex": _COMPLETED_STATUSES | {"quota_exceeded", "failed"},
+    "openalex": _COMPLETED_STATUSES | {"quota_exceeded", "failed", "frozen"},
     # Scopus resumes quota_exceeded, so it is not terminal there. A result_window_reached
     # batch sits at the API's offset ceiling and can never fetch another page.
-    "scopus": _COMPLETED_STATUSES | {"result_window_reached", "failed"},
+    "scopus": _COMPLETED_STATUSES | {"result_window_reached", "failed", "frozen"},
 }
 
 
@@ -284,7 +287,7 @@ def _terminal_metadata(bronze_root: Path) -> list[dict[str, Any]]:
             raise ProcessingError(f"Unable to read batch metadata {path.name}") from exc
         if not isinstance(record, dict):
             raise ProcessingError(f"Batch metadata {path.name} is not an object")
-        terminal = TERMINAL_STATUSES.get(record.get("source", "openalex"), _COMPLETED_STATUSES)
+        terminal = TERMINAL_STATUSES.get(record.get("source"), _COMPLETED_STATUSES)
         if record.get("status") in terminal and record.get("page_count", 0) > 0:
             records.append(record)
     return sorted(records, key=lambda record: (record.get("created_at", ""), record["batch_id"]))

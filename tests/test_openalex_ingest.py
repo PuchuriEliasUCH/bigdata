@@ -596,3 +596,20 @@ def test_no_new_batch_while_credit_reset_is_pending(tmp_path):
     assert session.rate_checks == 1
     assert session.calls == []
     assert len(list((tmp_path / "batch_metadata").glob("*.json"))) == 1
+
+
+def test_openalex_never_resumes_a_frozen_batch(tmp_path):
+    from src.freeze_batches import freeze_paused_batches
+
+    interrupted = CursorSession({"*": page(0, 200, "cursor-1"), "cursor-1": requests.ConnectionError("temporary failure")})
+    with pytest.raises(Exception):
+        run_ingestion(tmp_path, client=OpenAlexClient("unit-test-token", session=interrupted, max_retries=0), initial_target_records=450, page_size=200)
+    (metadata_path,) = (tmp_path / "batch_metadata").glob("*.json")
+    paused_id = json.loads(metadata_path.read_text())["batch_id"]
+    assert freeze_paused_batches(tmp_path) == [paused_id]
+    frozen = metadata_path.read_text()
+
+    later = run_ingestion(tmp_path, client=OpenAlexClient("unit-test-token", session=CursorSession({"*": page(0, 200, None)})), initial_target_records=200, page_size=200)
+
+    assert later.batch_id != paused_id
+    assert metadata_path.read_text() == frozen

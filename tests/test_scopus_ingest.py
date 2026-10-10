@@ -480,3 +480,24 @@ def test_request_spacing_counts_from_the_start_of_the_previous_request(tmp_path,
 def test_request_spacing_only_waits_for_the_remaining_interval(tmp_path, monkeypatch, clock):
     sleeps = _paced_run(tmp_path, monkeypatch, clock, latency=0.1, rps=2)
     assert len(sleeps) == 2 and all(abs(value - 0.4) < 1e-6 for value in sleeps)
+
+
+def test_scopus_never_resumes_a_frozen_batch(tmp_path, clock):
+    from src.freeze_batches import freeze_paused_batches
+
+    class Ticking(CorpusSession):
+        def get(self, url, *, params, headers, timeout):
+            clock.now += 1
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+
+    session = Ticking([(f"e{i}", 2020, 20200101 + i) for i in range(6)])
+    options = dict(query="PUBYEAR = 2020", target_records=6, page_size=2, requests_per_second=0)
+    paused = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), deadline=clock.now + 1.5, **options)
+    assert paused.status == "time_budget_reached"
+    assert freeze_paused_batches(tmp_path) == [paused.batch_id]
+    frozen = paused.metadata_path.read_text()
+
+    later = run_scopus_ingestion(tmp_path, client=ScopusClient("secret", session=session), **options)
+
+    assert later.batch_id != paused.batch_id
+    assert paused.metadata_path.read_text() == frozen

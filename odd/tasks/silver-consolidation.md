@@ -37,7 +37,20 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
 - [x] SC-5 Measure and document sampling bias and limitations in `documentacion/`.
   Evidence: `documentacion/5.limitaciones-muestreo.md`; OpenAlex order verified on Bronze pages (relevance and
   citations fall from first to last page, 2019-2024). Index links fixed after the renumbering.
-- [ ] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb`.
+- [x] SC-2b Freeze paused batches with pages (`time_budget_reached`: 39,200 OpenAlex + 900 Scopus records)
+  as terminal `frozen` via `python -m src.freeze_batches`; a metadata record without `source` accepts only
+  completed statuses (review WARNING R3-source-default-openalex, latent: every record on disk has `source`).
+  Evidence: writer full suite 192 passed; parent spot check freeze + recovery tests passed.
+- [ ] SC-7 Rebuild Silver v4 from Bronze without ingestion (scratch script calling `process_pending_batches`
+  and `compact_pending`); compare row counts with the baseline.
+- [ ] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb` (include count of batches that hold
+  pages but are not terminal, per review suggestion).
+
+## Review log
+- Slice 89a6457..75e6bcd (SC-2, SC-4, SC-5): medium risk, `slice_budget_reached`, consent granted; lineage
+  `review-3c8cac8fc6047bf9` approved and acknowledged (authority burned). Advisory findings: missing-source
+  default (fixed in SC-2b), untested `_attempt_deferred` branches (follow-up), paused batches never terminal
+  after the freeze (SC-2b).
 
 ## Acceptance criteria
 - Silver includes every Bronze batch that holds pages; no batch counted twice with `_compact/`.

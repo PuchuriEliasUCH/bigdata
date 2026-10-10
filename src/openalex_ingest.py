@@ -19,6 +19,9 @@ OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 DEFAULT_INITIAL_TARGET = 100_000
 DEFAULT_INCREMENTAL_LIMIT = 1_000
 DEFAULT_PAGE_SIZE = 200
+# A batch in one of these statuses is continued from its saved cursor on the next run.
+# "frozen" (see src/freeze_batches.py) is deliberately absent: it ends a paused batch for good.
+RESUMABLE_STATUSES = frozenset({"running", "transient_error", "rate_limited", "time_budget_reached"})
 
 
 class IngestionError(RuntimeError):
@@ -343,7 +346,7 @@ def _run_ingestion(
         record for record in store.list_metadata()
         if record.get("source", "openalex") == "openalex" and record.get("filter", "") == active_filter
     ]
-    running = [record for record in metadata_records if record.get("status") in {"running", "transient_error", "rate_limited", "time_budget_reached"}]
+    running = [record for record in metadata_records if record.get("status") in RESUMABLE_STATUSES]
     if len(running) > 1:
         raise BatchStateError("Multiple running batches cannot be resumed safely")
 

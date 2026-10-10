@@ -25,6 +25,8 @@ def write_metadata(bronze_root: Path, batch_id: str, status: str, *, source: str
         ("scopus", "completed_exhausted"),
         ("scopus", "result_window_reached"),
         ("scopus", "failed"),
+        ("openalex", "frozen"),
+        ("scopus", "frozen"),
     ],
 )
 def test_terminal_batches_with_pages_reach_silver(tmp_path, source, status):
@@ -43,6 +45,9 @@ def test_terminal_batches_with_pages_reach_silver(tmp_path, source, status):
         ("scopus", "quota_exceeded"),
         ("scopus", "rate_limited"),
         ("scopus", "time_budget_reached"),
+        # Without a source the status set is unknown, so only completed statuses count.
+        (None, "quota_exceeded"),
+        (None, "failed"),
     ],
 )
 def test_resumable_batches_wait_for_silver(tmp_path, source, status):

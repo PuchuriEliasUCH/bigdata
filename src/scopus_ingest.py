@@ -18,6 +18,11 @@ from src.openalex_ingest import BatchStateStore, BatchStateError, IngestionError
 SCOPUS_URL = "https://api.elsevier.com/content/search/scopus"
 DEFAULT_INITIAL_TARGET = 100_000
 DEFAULT_INCREMENTAL_LIMIT = 1_000
+# Statuses a batch never leaves; any other status is continued by the next run of its query.
+# "frozen" (see src/freeze_batches.py) ends a paused batch for good.
+CLOSED_STATUSES = frozenset({"completed_target", "completed_exhausted", "failed", "oversized", "frozen"})
+# Paused statuses the next run continues from next_offset.
+RESUMABLE_STATUSES = frozenset({"running", "time_budget_reached", "quota_exceeded", "rate_limited", "transient_error"})
 
 
 def split_year_range(query: str, first_year: int, last_year: int) -> list[str]:
@@ -108,7 +113,7 @@ def run_scopus_ingestion(
     api = client or ScopusClient.from_environment()
     with store.lock():
         history = [m for m in store.list_metadata() if m.get("source") == "scopus" and m.get("query") == query]
-        candidates = [m for m in history if m.get("status") not in {"completed_target", "completed_exhausted", "failed", "oversized"}]
+        candidates = [m for m in history if m.get("status") not in CLOSED_STATUSES]
         if len(candidates) > 1:
             raise BatchStateError("Multiple Scopus batches match this query")
         previous = max((m for m in history if m.get("status") in {"completed_target", "completed_exhausted"}), key=lambda m: m.get("created_at", ""), default=None)
@@ -285,7 +290,7 @@ def run_scopus_years(
     else:
         years = list(zip(range(first_year, last_year + 1), split_year_range(query, first_year, last_year)))
     summaries: list[ScopusSummary] = []
-    terminal = {"completed_target", "completed_exhausted", "failed", "oversized", "result_window_reached"}
+    terminal = CLOSED_STATUSES | {"result_window_reached"}
 
     cached_history: list[list[dict[str, Any]]] = []
 
