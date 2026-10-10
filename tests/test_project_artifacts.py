@@ -29,8 +29,10 @@ def test_notebook_uses_mounted_zones_without_token_access():
         if cell.get("cell_type") == "code"
     )
 
-    assert "/data/bronze" in source
-    assert "/data/silver" in source
+    # Inside the container the zones come from the /data mount; elsewhere from the checkout's data/.
+    assert 'Path("/data")' in source
+    assert 'DATA / "bronze"' in source
+    assert 'DATA / "silver"' in source
     assert "OPENALEX_TOKEN" not in source
     assert "batch metadata" in source.lower()
     assert "rejection" in source.lower()
