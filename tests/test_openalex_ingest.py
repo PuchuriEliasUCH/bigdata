@@ -539,3 +539,60 @@ def test_credits_are_checked_once_per_batch_not_once_per_page(tmp_path):
                             initial_target_records=6, page_size=2)
     assert summary.pages == 3
     assert session.rate_checks == 1
+
+
+class CreditSession(CursorSession):
+    """Answers the credit check with a configurable balance and reset time."""
+
+    def __init__(self, pages, credits, resets_at="2000-01-01T00:00:00Z"):
+        super().__init__(pages)
+        self.credits = credits
+        self.resets_at = resets_at
+        self.rate_checks = 0
+
+    def get(self, url, *, params, timeout):
+        if url.endswith("/rate-limit"):
+            self.rate_checks += 1
+            return FakeResponse({"rate_limit": {"credits_remaining": self.credits, "resets_at": self.resets_at}})
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_paused_batch_with_pages_stays_resumable_when_credits_run_low(tmp_path):
+    response = requests.Response()
+    response.status_code = 429
+    pages = {"*": page(0, 2, "cursor-1"), "cursor-1": requests.HTTPError("limited", response=response)}
+    session = CreditSession(pages, credits=100000)
+    with pytest.raises(OpenAlexRequestError):
+        run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session, max_retries=0), initial_target_records=4, page_size=2)
+
+    session.credits = 0
+    low = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session), initial_target_records=4, page_size=2)
+    assert low.status == "quota_exceeded"
+    state = json.loads(low.metadata_path.read_text())
+    assert state["status"] == "rate_limited"
+    assert state["stop_reason"] == "insufficient_credits"
+    assert state["page_count"] == 1
+
+    session.credits = 100000
+    session.pages["cursor-1"] = page(2, 2, None)
+    session.calls.clear()
+    resumed = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session), initial_target_records=4, page_size=2)
+    assert resumed.batch_id == low.batch_id
+    assert resumed.status == "completed_target"
+    assert resumed.records == 4
+    assert [call["params"]["cursor"] for call in session.calls] == ["cursor-1"]
+    assert len(list((tmp_path / "batch_metadata").glob("*.json"))) == 1
+
+
+def test_no_new_batch_while_credit_reset_is_pending(tmp_path):
+    session = CreditSession({"*": page(0, 1, None)}, credits=0, resets_at="2999-01-01T00:00:00Z")
+    first = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session), initial_target_records=3)
+    assert first.status == "quota_exceeded"
+
+    session.credits = 100000
+    second = run_ingestion(tmp_path, client=OpenAlexClient("secret", session=session), initial_target_records=3)
+    assert second.batch_id == first.batch_id
+    assert second.status == "quota_exceeded"
+    assert session.rate_checks == 1
+    assert session.calls == []
+    assert len(list((tmp_path / "batch_metadata").glob("*.json"))) == 1

@@ -301,6 +301,18 @@ def _batch_id(mode: str) -> str:
     return f"{mode}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
+def _attempt_deferred(next_attempt_at: Any) -> bool:
+    """True while an ISO reset time lies in the future; unparseable values never block."""
+
+    try:
+        resume_at = datetime.fromisoformat(str(next_attempt_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if resume_at.tzinfo is None:
+        resume_at = resume_at.replace(tzinfo=timezone.utc)
+    return resume_at > datetime.now(timezone.utc)
+
+
 def _latest_completed(metadata: list[dict[str, Any]]) -> dict[str, Any] | None:
     completed = [record for record in metadata if record.get("status") in {"completed", "completed_target", "completed_exhausted"}]
     if not completed:
@@ -341,6 +353,10 @@ def _run_ingestion(
         target_records = int(metadata.get("target_records", 0))
         if mode not in {"initial", "incremental"} or target_records < 1:
             raise BatchStateError("Running batch metadata is incomplete")
+        if metadata.get("next_attempt_at") and _attempt_deferred(metadata["next_attempt_at"]):
+            # Credits have not reset yet: wait without requests or a new metadata file.
+            status = "quota_exceeded" if metadata.get("stop_reason") == "insufficient_credits" else metadata["status"]
+            return IngestionSummary(metadata["batch_id"], mode, status, int(metadata.get("page_count", 0)), int(metadata.get("record_count", 0)), metadata["_metadata_path"])
     else:
         initial_complete = any(
             record.get("mode") == "initial" and record.get("status") in {"completed", "completed_target", "completed_exhausted"}
@@ -405,7 +421,10 @@ def _run_ingestion(
                 limit = client.rate_limit()
                 metadata["credits_remaining"] = limit["credits_remaining"]
                 if limit["credits_remaining"] < 10:
-                    metadata.update(status="quota_exceeded", stop_reason="insufficient_credits", next_attempt_at=limit["resets_at"], updated_at=utc_now())
+                    # Pause, never end: a terminal status would strand this batch's pages
+                    # and restart the lineage from an older cursor. The run still reports
+                    # quota_exceeded, and the batch resumes once next_attempt_at passes.
+                    metadata.update(status="rate_limited", stop_reason="insufficient_credits", next_attempt_at=limit["resets_at"], updated_at=utc_now())
                     path = store.write_metadata(metadata)
                     return IngestionSummary(metadata["batch_id"], mode, "quota_exceeded", page_count, record_count, path)
             payload = client.fetch_page(cursor=cursor, per_page=request_size)

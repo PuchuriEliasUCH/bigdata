@@ -254,7 +254,25 @@ def _processing_lock(silver_root: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _completed_metadata(bronze_root: Path) -> list[dict[str, Any]]:
+# Statuses the ingester never resumes, per source. Silver marks a batch processed once
+# and never rereads it, so only batches that can no longer grow may enter: a paused
+# (resumable) batch waits until it turns terminal. Pages are written whole, so a batch
+# that stopped early still holds valid rows; overlap with a later batch that restarted
+# from an earlier cursor is caught by Silver's cross-batch deduplication.
+_COMPLETED_STATUSES = frozenset({"completed", "completed_target", "completed_exhausted"})
+TERMINAL_STATUSES = {
+    # OpenAlex no longer writes quota_exceeded (low credits pause the batch instead);
+    # batches written before that change were never resumed.
+    "openalex": _COMPLETED_STATUSES | {"quota_exceeded", "failed"},
+    # Scopus resumes quota_exceeded, so it is not terminal there. A result_window_reached
+    # batch sits at the API's offset ceiling and can never fetch another page.
+    "scopus": _COMPLETED_STATUSES | {"result_window_reached", "failed"},
+}
+
+
+def _terminal_metadata(bronze_root: Path) -> list[dict[str, Any]]:
+    """Bronze batches that hold pages and will never be resumed (see TERMINAL_STATUSES)."""
+
     metadata_dir = bronze_root / "batch_metadata"
     if not metadata_dir.exists():
         return []
@@ -266,7 +284,8 @@ def _completed_metadata(bronze_root: Path) -> list[dict[str, Any]]:
             raise ProcessingError(f"Unable to read batch metadata {path.name}") from exc
         if not isinstance(record, dict):
             raise ProcessingError(f"Batch metadata {path.name} is not an object")
-        if record.get("status") in {"completed", "completed_target", "completed_exhausted"} and record.get("page_count", 0) > 0:
+        terminal = TERMINAL_STATUSES.get(record.get("source", "openalex"), _COMPLETED_STATUSES)
+        if record.get("status") in terminal and record.get("page_count", 0) > 0:
             records.append(record)
     return sorted(records, key=lambda record: (record.get("created_at", ""), record["batch_id"]))
 
@@ -381,7 +400,7 @@ def process_pending_batches(
     silver_root: str | Path,
     deadline: float | None = None,
 ) -> ProcessingSummary:
-    """Process completed Bronze batches once and write Silver/Rejected zones.
+    """Process terminal Bronze batches once and write Silver/Rejected zones.
 
     After the deadline no new batch is started, but at least one batch is always
     processed so a rebuild keeps progressing and finishes across several runs.
@@ -416,7 +435,7 @@ def process_pending_batches(
                 finished = False
             if finished:
                 completed_silver_paths.append(silver_path / "works" / state_file.stem)
-        for metadata in _completed_metadata(bronze_path):
+        for metadata in _terminal_metadata(bronze_path):
             batch_id = str(metadata["batch_id"])
             state_path = _processing_state_path(silver_path, batch_id)
             if state_path.exists():

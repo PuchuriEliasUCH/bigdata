@@ -14,7 +14,7 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from src.spark_pipeline import PARQUET_WRITE_OPTIONS, ProcessingError, _completed_metadata, _processing_lock
+from src.spark_pipeline import PARQUET_WRITE_OPTIONS, ProcessingError, _terminal_metadata, _processing_lock
 
 
 def _manifest_path(root: Path) -> Path:
@@ -167,7 +167,7 @@ def compact_pending(
     """
     root = Path(silver_root)
     owned = {batch for entry in _manifest(root).values() for batch in entry["batches"]}
-    lineage = {record["batch_id"]: _group_key(record) for record in _completed_metadata(Path(bronze_root))}
+    lineage = {record["batch_id"]: _group_key(record) for record in _terminal_metadata(Path(bronze_root))}
     pending: dict[tuple[str, str], list[str]] = defaultdict(list)
     for work in sorted((root / "works").glob("*")):
         state_path = root / "_processing" / f"{work.name}.json"

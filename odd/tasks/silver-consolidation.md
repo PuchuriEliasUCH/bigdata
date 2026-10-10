@@ -1,0 +1,54 @@
+# Silver consolidation before Gold
+
+## Objective
+Make Bronze/Silver a solid base for the Gold layer (topic × year dataset to train a neural network that
+predicts emerging AI topics), working only with the data already downloaded.
+
+## Problem and rationale
+A read-only audit (2026-10-09) found the code sound but the dataset not ready:
+- OpenAlex batches that turn `quota_exceeded` while holding pages are never resumed, and Silver only
+  reads `completed*` batches (`src/spark_pipeline.py:269`, `src/openalex_ingest.py:334`) → ~44k records
+  stranded. Scopus `result_window_reached` (3,403) and `failed` (850) batches are excluded too.
+- The sources search different populations (Scopus query lacks bare AI/IA).
+- Within-year sample order is biased (OpenAlex has no `sort`; Scopus walks earliest load-date windows first).
+- 17% of OpenAlex rows are rejected in Silver, cause unknown.
+
+## Scope and constraints
+- Delivery deadline: no re-sampling and no new downloads. Unfixable biases are measured and documented.
+- Silver keeps rows and exposes quality as flags (existing design in `src/silver_rules.py`).
+- Ingestion is frozen: no container is running since the audit (dataset cut 2026-10-09).
+- Gold and the neural network are the next milestone, out of scope here.
+
+## Tasks
+- [x] SC-1 Freeze the dataset (scheduler stopped; no running containers on 2026-10-09).
+- [ ] SC-2 Recover stranded rows: Silver accepts terminal batches that hold pages; OpenAlex paused batches
+  with pages stay resumable when credits run low and honour `next_attempt_at`. Tests for both paths.
+- [x] SC-3 Explain the 17% OpenAlex rejection rate (breakdown by `rejection_reason`, source, year).
+  Result (Spark over `silver/rejected` + `_compact/*-rejected-*`, 104,424 rows): every OpenAlex rejection
+  is a duplicate — 89,263 `duplicate_source_id_previous_batch` (pages re-downloaded after batches restart
+  from the last completed cursor; fixed by SC-2) and 14,111 `duplicate_source_id` within a batch. Scopus:
+  1,048 duplicates, 2 `missing_title`. No valid record is lost; the cost was wasted API quota. Documented,
+  no code fix beyond SC-2.
+- [ ] SC-4 Silver v4 flags: `matches_common_query`, `is_eligible`, `work_type_norm`. Tests.
+- [ ] SC-5 Measure and document sampling bias and limitations in `documentacion/`.
+- [ ] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb`.
+
+## Acceptance criteria
+- Silver includes every Bronze batch that holds pages; no batch counted twice with `_compact/`.
+- `_schema_version.json` = 4 with the three flags populated for both sources.
+- Rejection breakdown known and either fixed or documented.
+- Limitations documented; quality report reproducible from the notebook.
+
+## Checks
+- `docker compose -f compose.yaml run --rm --build spark-pipeline pytest -q`
+- One pipeline run after SC-2/SC-4; compare Silver row counts before/after.
+
+## Progress and verification
+- Branch `feat/silver-consolidation` created from `feat/global-bronze-cap` (89a6457).
+- Baseline Silver: OpenAlex ~500,626 valid rows, Scopus ~445,032 (manifest + `_processing`).
+
+## Route log
+- SC-1 inline (state check only).
+
+## Next step
+SC-3 analysis (inline, Spark in container) and SC-2 (delegated writer).
