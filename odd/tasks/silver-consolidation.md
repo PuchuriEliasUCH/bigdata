@@ -57,6 +57,11 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
   `review-3c8cac8fc6047bf9` approved and acknowledged (authority burned). Advisory findings: missing-source
   default (fixed in SC-2b), untested `_attempt_deferred` branches (follow-up), paused batches never terminal
   after the freeze (SC-2b).
+- Slice 75e6bcd..99f1c1b (SC-2b, SC-6, SC-7 docs): medium, `slice_budget_reached`, consent granted; lineage
+  `review-bf2118330a900082` approved and acknowledged. Advisory follow-ups (non-blocking, all latent while
+  ingestion is frozen): freeze skips records without `source` (none on disk); `run_scopus_years` treats a
+  frozen window as finished (contradicts the operations doc if ingestion resumes); null `page_count` aborts
+  the freeze loop; broad `pytest.raises(Exception)` in the frozen-resume test.
 
 ## Acceptance criteria
 - Silver includes every Bronze batch that holds pages; no batch counted twice with `_compact/`.
