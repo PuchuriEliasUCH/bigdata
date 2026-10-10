@@ -32,7 +32,7 @@ GOLD_VERSION = 2
 SOURCE = "openalex"
 TOPIC_ASSIGNMENT = "primary_topic"
 PREVALENCE_TOLERANCE = 1e-9
-_TOPIC_ATTRIBUTES = ("topic_name", "subfield", "field", "domain")
+_TAXONOMY = ("subfield", "field", "domain")
 _TABLES = ("year_totals", "topic_year")
 _MANIFEST = "_manifest.json"
 
@@ -112,11 +112,28 @@ def year_totals(
     )
 
 
+def validate_taxonomy(universe: DataFrame) -> None:
+    """Raise unless every topic id maps to exactly one (subfield, field, domain).
+
+    The taxonomy is a static property of the topic id in the frozen OpenAlex snapshot
+    recorded in the manifest, so it is a lookup, never a vote that could read later years.
+    """
+    conflicts = universe.select("topic_id", *_TAXONOMY).distinct().groupBy("topic_id").count().filter("count > 1")
+    if conflicts.limit(1).count():
+        sample = sorted(row["topic_id"] for row in conflicts.select("topic_id").limit(5).collect())
+        raise GoldError(f"Topics map to more than one (subfield, field, domain): {sample}")
+
+
 def _topic_attributes(universe: DataFrame) -> DataFrame:
-    """Most frequent name/subfield/field/domain per topic; ties resolved by value order."""
-    counted = universe.groupBy("topic_id", *_TOPIC_ATTRIBUTES).agg(F.count(F.lit(1)).alias("_n"))
-    rank = Window.partitionBy("topic_id").orderBy(F.desc("_n"), *(F.asc_nulls_last(name) for name in _TOPIC_ATTRIBUTES))
-    return counted.withColumn("_rank", F.row_number().over(rank)).filter("_rank = 1").drop("_n", "_rank")
+    """Static taxonomy per topic plus its display name.
+
+    The name is the most frequent one over all years (ties by value order). It is a label
+    for human review, never a feature, so reading later years there does not leak.
+    """
+    names = universe.groupBy("topic_id", "topic_name").agg(F.count(F.lit(1)).alias("_n"))
+    rank = Window.partitionBy("topic_id").orderBy(F.desc("_n"), F.asc_nulls_last("topic_name"))
+    names = names.withColumn("_rank", F.row_number().over(rank)).filter("_rank = 1").drop("_n", "_rank")
+    return names.join(universe.select("topic_id", *_TAXONOMY).distinct(), "topic_id")
 
 
 def topic_year_grid(
@@ -197,24 +214,45 @@ def _write_parquet(frame: DataFrame, path: Path) -> None:
     frame.coalesce(1).write.mode("overwrite").options(**PARQUET_WRITE_OPTIONS).parquet(str(path))
 
 
+def _undo(moves: list[tuple[Path, Path]]) -> None:
+    """Best effort: move every completed (source, target) back, newest first."""
+    for source, target in reversed(moves):
+        try:
+            os.replace(target, source)
+        except OSError:
+            pass
+
+
 def _publish(gold: Path, staging: Path, manifest: dict) -> None:
     """Swap the staged tables into place, then write the manifest last.
 
-    The old manifest is moved away first, so a crash mid-swap leaves no manifest
-    describing tables it does not match.
+    The previous manifest and tables are moved to a trash directory first, so a crash
+    mid-swap never leaves a manifest describing tables it does not match. Any failure
+    moves everything back (newest first) and re-raises; the trash is deleted only after
+    the full swap succeeds, and kept when the restore itself fails.
     """
     trash = gold / f"_trash-{uuid.uuid4().hex}"
     trash.mkdir()
+    moves: list[tuple[Path, Path]] = []
     try:
-        if (gold / _MANIFEST).exists():
-            os.replace(gold / _MANIFEST, trash / _MANIFEST)
-        for name in _TABLES:
+        for name in (_MANIFEST, *_TABLES):
             if (gold / name).exists():
                 os.replace(gold / name, trash / name)
+                moves.append((gold / name, trash / name))
+        for name in _TABLES:
             os.replace(staging / name, gold / name)
+            moves.append((staging / name, gold / name))
         _write_json_atomic(gold / _MANIFEST, manifest)
-    finally:
-        shutil.rmtree(trash, ignore_errors=True)
+    except BaseException:
+        _undo(moves)
+        for leftover in gold.glob(f".{_MANIFEST}.*.tmp"):
+            leftover.unlink(missing_ok=True)
+        try:
+            trash.rmdir()
+        except OSError:
+            pass
+        raise
+    shutil.rmtree(trash, ignore_errors=True)
 
 
 def build_gold(
@@ -232,7 +270,8 @@ def build_gold(
     """Write year_totals/, topic_year/ and _manifest.json (last) under gold_root.
 
     Tables are written to a staging directory and validated before they replace the
-    previous Gold, so a failure before the swap leaves the previous Gold untouched.
+    previous Gold. A failure before the swap leaves the previous Gold untouched; a failure
+    during the swap restores the previous tables and manifest before re-raising.
     """
     gold = Path(gold_root)
     years = {"first_year": first_year, "last_year": last_year}
@@ -244,6 +283,7 @@ def build_gold(
         cached.append(universe)
         if universe.limit(1).count() == 0:
             raise GoldError("Gold universe is empty: no comparable OpenAlex publications in Silver")
+        validate_taxonomy(universe)
         totals = year_totals(universe, plan_totals, **years).cache()
         cached.append(totals)
         grid = topic_year_grid(
@@ -316,3 +356,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

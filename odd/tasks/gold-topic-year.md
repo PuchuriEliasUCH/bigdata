@@ -68,8 +68,15 @@ A training row is valid for an evaluation window starting at year E when `label_
   leakage test). Review follow-ups from GD-1 applied: staged atomic publish, local unpersist, GoldError paths.
   Signal check (labelable rows, mean by class): clearest gaps in growth_2y_past 0.40 vs 0.55,
   consecutive_growth_years 1.00 vs 1.26, subfield_growth_1y 0.03 vs 0.10; volume features nearly identical.
-- [ ] GD-3 Run in the container, `documentacion/6.gold.md`, notebook section: class distribution,
+- [x] GD-3 Run in the container, `documentacion/6.gold.md`, notebook section: class distribution,
   sensitivity grid (growth 0.30/0.50/0.70 × support 5/10/20), sample emergent topics for manual review.
+  Evidence: 222 passed (writer); real data 52,380 / 3,308 / 289; `notebooks/gold_evidence.ipynb` executed, 0 error
+  cells. Splits: train-for-val 2011–2017 1,003 rows / 103 pos; val 2019–2020 687 / 42; retrain 2011–2020
+  1,946 / 165; test 2022–2023 946 / 96. Sensitivity: rate 6.5–11.7%, driven by the growth threshold.
+  Review follow-ups from GD-2 applied: recoverable swap with rollback; taxonomy is a static lookup (all 3,492
+  topics have one subfield/field/domain; `validate_taxonomy` enforces it); authors_per_pub_t documented.
+  Known limitation: OpenAlex assigns current topics retroactively (e.g. "COVID-19 diagnosis using AI" emergent
+  from base 2018).
 
 ## Acceptance criteria
 - `topic_year` has 52,380 rows and no duplicate (`topic_id`, `year`).
@@ -92,4 +99,5 @@ A training row is valid for an evaluation window starting at year E when `label_
 - GD-1 delegated writer (2 new modules + tests).
 
 ## Next step
-GD-1.
+Gold complete. Next milestone: baselines (growth rule, logistic regression, boosting) and the neural network
+(GRU/LSTM over topic sequences) with the documented temporal split.

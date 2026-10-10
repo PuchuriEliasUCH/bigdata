@@ -1,11 +1,21 @@
 import json
+import os
+from pathlib import Path
 
 import pytest
 from pyspark.sql import functions as F
 
 import src.gold_pipeline as gold_pipeline
 from src.gold_features import FEATURE_COLUMNS
-from src.gold_pipeline import GoldError, build_gold, gold_universe, topic_year_grid, validate_grid, year_totals
+from src.gold_pipeline import (
+    GoldError,
+    build_gold,
+    gold_universe,
+    topic_year_grid,
+    validate_grid,
+    validate_taxonomy,
+    year_totals,
+)
 from src.gold_rules import emergence_label
 
 _SCHEMA = (
@@ -149,22 +159,41 @@ def test_build_gold_writes_tables_and_manifest(spark, layout):
     assert build_gold(spark, silver, bronze, gold) == summary
 
 
-def test_topic_attributes_take_majority_then_value_order(spark, tmp_path):
+def test_topic_name_takes_majority_then_value_order(spark, tmp_path):
     rows = [
-        # T1: subfield "Sub X" 3 times vs "Sub Y" once -> majority.
+        # T1: name "One" 3 times vs "Uno" once -> majority.
         *(_row(i, 2011 + i % 2, "T1", topic=("T1", "One", 0.9, "Sub X", "F", "D")) for i in range(3)),
-        _row(3, 2012, "T1", topic=("T1", "One", 0.9, "Sub Y", "F", "D")),
-        # T2: a 2-2 tie between "Sub B" and "Sub A" -> value order picks "Sub A".
-        *(_row(10 + i, 2011, "T2", topic=("T2", "Two", 0.9, "Sub B", "F", "D")) for i in range(2)),
-        *(_row(20 + i, 2013, "T2", topic=("T2", "Two", 0.9, "Sub A", "F", "D")) for i in range(2)),
+        _row(3, 2012, "T1", topic=("T1", "Uno", 0.9, "Sub X", "F", "D")),
+        # T2: a 2-2 tie between "Two B" and "Two A" -> value order picks "Two A".
+        *(_row(10 + i, 2011, "T2", topic=("T2", "Two B", 0.9, "Sub B", "F", "D")) for i in range(2)),
+        *(_row(20 + i, 2013, "T2", topic=("T2", "Two A", 0.9, "Sub B", "F", "D")) for i in range(2)),
     ]
     spark.createDataFrame(rows, _SCHEMA).write.parquet(str(tmp_path / "silver" / "works" / "one"))
     universe = gold_universe(spark, tmp_path / "silver")
+    validate_taxonomy(universe)
     grid = topic_year_grid(universe, year_totals(universe, {}))
     assert grid.count() == 2 * len(YEARS)
     assert grid.groupBy("topic_id", "year").count().filter("count > 1").count() == 0
-    subfields = {row["topic_id"]: row["subfield"] for row in grid.select("topic_id", "subfield").distinct().collect()}
-    assert subfields == {"T1": "Sub X", "T2": "Sub A"}
+    attributes = {row["topic_id"]: (row["topic_name"], row["subfield"]) for row in
+                  grid.select("topic_id", "topic_name", "subfield").distinct().collect()}
+    assert attributes == {"T1": ("One", "Sub X"), "T2": ("Two A", "Sub B")}
+
+
+def test_topic_with_more_than_one_taxonomy_raises_gold_error(spark, tmp_path):
+    # A later year reclassifying the topic must fail loudly, not be resolved by a vote over all years.
+    rows = [
+        *(_row(i, 2011, "T1", topic=("T1", "One", 0.9, "Sub X", "F", "D")) for i in range(3)),
+        _row(3, 2020, "T1", topic=("T1", "One", 0.9, "Sub Y", "F", "D")),
+        _row(4, 2012, "T2", topic=("T2", "Two", 0.9, "Sub X", "F", None)),
+    ]
+    spark.createDataFrame(rows, _SCHEMA).write.parquet(str(tmp_path / "silver" / "works" / "one"))
+    bronze = tmp_path / "bronze"
+    _write_plan(bronze)
+    with pytest.raises(GoldError, match=r"more than one \(subfield, field, domain\).*T1"):
+        validate_taxonomy(gold_universe(spark, tmp_path / "silver"))
+    with pytest.raises(GoldError, match="subfield"):
+        build_gold(spark, tmp_path / "silver", bronze, tmp_path / "gold")
+    assert not (tmp_path / "gold" / "_manifest.json").exists()
 
 
 def test_missing_or_malformed_plan_raises_gold_error(spark, layout):
@@ -215,4 +244,31 @@ def test_failed_write_keeps_previous_gold_consistent(spark, layout, monkeypatch)
     assert sorted(path.name for path in gold.iterdir()) == ["_manifest.json", "topic_year", "year_totals"]
     monkeypatch.undo()
     assert build_gold(spark, silver, bronze, gold, min_support=5).labeled_rows > previous.labeled_rows
+    assert sorted(path.name for path in gold.iterdir()) == ["_manifest.json", "topic_year", "year_totals"]
+
+
+@pytest.mark.parametrize("failing_step", ["second_table", "manifest"])
+def test_failed_swap_restores_previous_gold(spark, layout, monkeypatch, failing_step):
+    silver, bronze, gold = layout
+    previous = build_gold(spark, silver, bronze, gold)
+    manifest = (gold / "_manifest.json").read_text()
+    real_replace = os.replace
+
+    def replace(source, target):
+        source, target = Path(source), Path(target)
+        moving_second_table = source.parent.name.startswith("_staging-") and source.name == "topic_year"
+        writing_manifest = target == gold / "_manifest.json" and source.name.endswith(".tmp")
+        if (failing_step == "second_table" and moving_second_table) or (failing_step == "manifest" and writing_manifest):
+            raise OSError("swap interrupted")
+        real_replace(source, target)
+
+    monkeypatch.setattr(gold_pipeline.os, "replace", replace)
+    with pytest.raises(OSError, match="swap interrupted"):
+        build_gold(spark, silver, bronze, gold, min_support=5)
+    monkeypatch.undo()
+    assert (gold / "_manifest.json").read_text() == manifest
+    topic_year = spark.read.parquet(str(gold / "topic_year"))
+    assert topic_year.count() == previous.rows
+    assert topic_year.filter(F.col("target_emerging").isNotNull()).count() == previous.labeled_rows
+    assert spark.read.parquet(str(gold / "year_totals")).count() == len(YEARS)
     assert sorted(path.name for path in gold.iterdir()) == ["_manifest.json", "topic_year", "year_totals"]

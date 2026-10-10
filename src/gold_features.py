@@ -68,6 +68,9 @@ def _community(universe: DataFrame) -> DataFrame:
         "topic_id", F.col("publication_year").alias("year"), "authors", "institutions", "country_codes",
         "is_oa", "work_type_norm",
     )
+    # authors_per_pub_t is the authorship count per publication (OpenAlex author_count):
+    # authors without an id still count. unique_authors_t and new_author_ratio_t need an id
+    # to identify a person, so they ignore null ids on purpose.
     composition = publications.groupBy("topic_id", "year").agg(
         F.avg(F.when(F.col("authors").isNotNull(), F.size("authors"))).alias("authors_per_pub_t"),
         _share(F.coalesce(F.col("is_oa"), F.lit(False))).alias("oa_ratio_t"),
