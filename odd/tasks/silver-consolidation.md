@@ -41,10 +41,16 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
   as terminal `frozen` via `python -m src.freeze_batches`; a metadata record without `source` accepts only
   completed statuses (review WARNING R3-source-default-openalex, latent: every record on disk has `source`).
   Evidence: writer full suite 192 passed; parent spot check freeze + recovery tests passed.
-- [ ] SC-7 Rebuild Silver v4 from Bronze without ingestion (scratch script calling `process_pending_batches`
+- [x] SC-7 Rebuild Silver v4 from Bronze without ingestion (scratch script calling `process_pending_batches`
   and `compact_pending`); compare row counts with the baseline.
-- [ ] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb` (include count of batches that hold
+  Evidence (2026-10-10): 303/303 batches completed, 14 compacted groups, 2,489 s for the final run. Silver v4:
+  1,007,148 rows, no duplicate (source, source_id). OpenAlex 557,846 (+57k vs baseline), Scopus 449,302 (+4.3k).
+  42,310 DOIs appear in both sources. matches_common_query: OpenAlex 98.9%, Scopus 100%. is_eligible: OpenAlex
+  74.1% (preprints 61,623, book chapters 33,386, other 38,407), Scopus 94.2%.
+- [x] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb` (include count of batches that hold
   pages but are not terminal, per review suggestion).
+  Evidence: executed with nbconvert (data mounted read-only, run as root), 29 cells, 0 errors. Values match
+  SC-7; non-terminal batches with pages = 0; rejected rows after rebuild 131,287 (supersedes SC-3 count).
 
 ## Review log
 - Slice 89a6457..75e6bcd (SC-2, SC-4, SC-5): medium risk, `slice_budget_reached`, consent granted; lineage
@@ -73,4 +79,4 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
 - SC-4 delegated writer (rules, columns, schema bump, tests).
 
 ## Next step
-SC-3 analysis (inline, Spark in container) and SC-2 (delegated writer).
+Consolidation complete. Next milestone: define the emergence label (horizon, threshold) and design Gold.
