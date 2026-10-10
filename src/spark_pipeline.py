@@ -19,7 +19,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 from src.silver_columns import normalize_unicode, openalex_columns, scopus_columns
-from src.silver_rules import with_rejection_reasons
+from src.silver_rules import with_quality_flags, with_rejection_reasons
 from pyspark.sql.types import (
     ArrayType,
     BooleanType,
@@ -32,7 +32,7 @@ from pyspark.sql.types import (
 
 
 # Bump when Silver's columns or rules change: the next run rebuilds Silver from Bronze.
-SILVER_SCHEMA_VERSION = 3
+SILVER_SCHEMA_VERSION = 4
 
 # zstd level 9 roughly halves snappy's size on this data at an acceptable write cost.
 PARQUET_WRITE_OPTIONS = {"compression": "zstd", "parquet.compression.codec.zstd.level": "9"}
@@ -351,7 +351,9 @@ def _process_one_batch(
     silver_path = silver_root / "works" / batch_id
     rejected_path = silver_root / "rejected" / batch_id
     (
-        normalize_unicode(_silver_columns(accepted, processed_at, source, metadata.get("created_at"))).repartition(output_partitions(int(metadata.get("record_count", 0))))
+        # Flags read the NFC text, so they are added after normalization.
+        with_quality_flags(normalize_unicode(_silver_columns(accepted, processed_at, source, metadata.get("created_at"))))
+        .repartition(output_partitions(int(metadata.get("record_count", 0))))
         .write.mode("overwrite")
         .options(**PARQUET_WRITE_OPTIONS)
         .parquet(str(silver_path))

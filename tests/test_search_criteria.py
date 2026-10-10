@@ -25,3 +25,10 @@ def test_openalex_filter_uses_the_same_terms_without_scopus_wildcards():
 
 def test_terms_are_defined_once_for_both_sources():
     assert len(AI_TERMS) == len(set(AI_TERMS))
+
+
+def test_common_terms_drop_only_the_bare_acronyms():
+    from src.search_criteria import COMMON_TERMS
+
+    assert "AI" not in COMMON_TERMS and "IA" not in COMMON_TERMS
+    assert set(COMMON_TERMS) == set(AI_TERMS) - {"AI", "IA"}

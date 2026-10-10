@@ -6,6 +6,9 @@ derived from one term list. Document-type and language filtering stays in Silver
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 # A trailing "*" is a Scopus wildcard; OpenAlex stems search terms, so it is dropped there.
 AI_TERMS: tuple[str, ...] = (
     "artificial intelligence",
@@ -36,6 +39,28 @@ AI_TERMS: tuple[str, ...] = (
     "AI trend*",
     "emerging artificial intelligence",
 )
+
+# The definition both sources share in Silver. The bare acronyms are dropped: they are
+# too ambiguous to recheck locally ("Iowa (IA)", "Ai Weiwei").
+COMMON_TERMS: tuple[str, ...] = tuple(term for term in AI_TERMS if term not in {"AI", "IA"})
+
+
+def _term_pattern(term: str) -> str:
+    words = unicodedata.normalize("NFC", term.lower()).split()
+    prefix = words[-1].endswith("*")
+    words[-1] = words[-1].rstrip("*")
+    body = r"[\s\-]+".join(re.escape(word) for word in words)
+    # OpenAlex stems search terms, so a plain term also accepts a simple plural.
+    return body + (r"\w*" if prefix else "(?:s|es)?")
+
+
+def common_query_pattern(terms: tuple[str, ...] = COMMON_TERMS) -> str:
+    """One regex matching any term as whole words in lowercased, NFC-normalized text.
+
+    Valid for both Python's re and Java (Spark rlike, with the (?U) flag so word
+    boundaries understand accented letters).
+    """
+    return r"\b(?:" + "|".join(_term_pattern(term) for term in terms) + r")\b"
 
 
 def scopus_query(terms: tuple[str, ...] = AI_TERMS) -> str:
