@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 from src.compaction import active_silver_paths
+from src.gold_features import FEATURE_COLUMNS, add_features
 from src.gold_rules import (
     FIRST_YEAR,
     GROWTH_THRESHOLD,
@@ -25,11 +28,13 @@ from src.gold_rules import (
 )
 from src.spark_pipeline import PARQUET_WRITE_OPTIONS, _write_json_atomic
 
-GOLD_VERSION = 1
+GOLD_VERSION = 2
 SOURCE = "openalex"
 TOPIC_ASSIGNMENT = "primary_topic"
 PREVALENCE_TOLERANCE = 1e-9
 _TOPIC_ATTRIBUTES = ("topic_name", "subfield", "field", "domain")
+_TABLES = ("year_totals", "topic_year")
+_MANIFEST = "_manifest.json"
 
 
 class GoldError(RuntimeError):
@@ -124,7 +129,7 @@ def topic_year_grid(
     growth_threshold: float = GROWTH_THRESHOLD,
     min_support: int = MIN_SUPPORT,
 ) -> DataFrame:
-    """Every topic seen x every year, with n_t (0 when absent), prevalence and the label.
+    """Every topic seen x every year, with n_t (0 when absent), prevalence, FEATURE_COLUMNS and the label.
 
     `label_*` columns hold future values for audit only and must never be used as features.
     """
@@ -137,6 +142,7 @@ def topic_year_grid(
         .withColumn("n_t", F.coalesce("n_t", F.lit(0)).cast("long"))
         .withColumn("prevalence_t", F.when(F.col("n_total") > 0, F.col("n_t") / F.col("n_total")))
     )
+    grid = add_features(grid, universe, first_year=first_year)
     # The grid is dense, so the k-th following row is exactly year t + k.
     ahead = Window.partitionBy("topic_id").orderBy("year")
     future = [F.lead("prevalence_t", step).over(ahead) for step in range(1, horizon + 1)]
@@ -150,7 +156,7 @@ def topic_year_grid(
         .withColumn("eligible_for_label", eligible)
         .withColumn("target_emerging", emergence_label_column(F.col("n_t"), path, F.col("year"), growth_threshold=growth_threshold, **rule))
         .withColumn("label_end_year", F.when(eligible, F.col("year") + horizon).cast("int"))
-        .select("topic_id", "year", *_TOPIC_ATTRIBUTES, "n_t", "n_total", "prevalence_t",
+        .select("topic_id", "year", "topic_name", "n_total", *FEATURE_COLUMNS,
                 *(name for name in grid.columns if name.startswith("label_")), f"label_growth_{horizon}y",
                 "eligible_for_label", "target_emerging", "label_end_year")
     )
@@ -178,7 +184,37 @@ def _plan_totals(bronze_root: Path) -> dict[str, int]:
     plan = Path(bronze_root) / "plans" / f"{SOURCE}.json"
     if not plan.exists():
         raise GoldError(f"Missing ingestion plan {plan.name}")
-    return json.loads(plan.read_text(encoding="utf-8"))["plan"]["totals"]
+    try:
+        totals = json.loads(plan.read_text(encoding="utf-8"))["plan"]["totals"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise GoldError(f"Ingestion plan {plan.name} has no readable plan.totals") from error
+    if not isinstance(totals, dict):
+        raise GoldError(f"Ingestion plan {plan.name} has no readable plan.totals")
+    return totals
+
+
+def _write_parquet(frame: DataFrame, path: Path) -> None:
+    frame.coalesce(1).write.mode("overwrite").options(**PARQUET_WRITE_OPTIONS).parquet(str(path))
+
+
+def _publish(gold: Path, staging: Path, manifest: dict) -> None:
+    """Swap the staged tables into place, then write the manifest last.
+
+    The old manifest is moved away first, so a crash mid-swap leaves no manifest
+    describing tables it does not match.
+    """
+    trash = gold / f"_trash-{uuid.uuid4().hex}"
+    trash.mkdir()
+    try:
+        if (gold / _MANIFEST).exists():
+            os.replace(gold / _MANIFEST, trash / _MANIFEST)
+        for name in _TABLES:
+            if (gold / name).exists():
+                os.replace(gold / name, trash / name)
+            os.replace(staging / name, gold / name)
+        _write_json_atomic(gold / _MANIFEST, manifest)
+    finally:
+        shutil.rmtree(trash, ignore_errors=True)
 
 
 def build_gold(
@@ -193,15 +229,27 @@ def build_gold(
     growth_threshold: float = GROWTH_THRESHOLD,
     min_support: int = MIN_SUPPORT,
 ) -> GoldSummary:
-    """Write year_totals/, topic_year/ and _manifest.json (last) under gold_root."""
+    """Write year_totals/, topic_year/ and _manifest.json (last) under gold_root.
+
+    Tables are written to a staging directory and validated before they replace the
+    previous Gold, so a failure before the swap leaves the previous Gold untouched.
+    """
     gold = Path(gold_root)
     years = {"first_year": first_year, "last_year": last_year}
-    universe = gold_universe(spark, silver_root, **years).cache()
+    plan_totals = _plan_totals(bronze_root)
+    cached: list[DataFrame] = []
+    staging = gold / f"_staging-{uuid.uuid4().hex}"
     try:
-        totals = year_totals(universe, _plan_totals(bronze_root), **years).cache()
+        universe = gold_universe(spark, silver_root, **years).cache()
+        cached.append(universe)
+        if universe.limit(1).count() == 0:
+            raise GoldError("Gold universe is empty: no comparable OpenAlex publications in Silver")
+        totals = year_totals(universe, plan_totals, **years).cache()
+        cached.append(totals)
         grid = topic_year_grid(
             universe, totals, **years, horizon=horizon, growth_threshold=growth_threshold, min_support=min_support
         ).cache()
+        cached.append(grid)
         validate_grid(grid, totals)
         stats = grid.agg(
             F.count(F.lit(1)).alias("rows"),
@@ -216,9 +264,14 @@ def build_gold(
         )
         if summary.rows != summary.topic_count * (last_year - first_year + 1):
             raise GoldError("topic_year is not a dense topic x year grid")
-        totals.coalesce(1).write.mode("overwrite").options(**PARQUET_WRITE_OPTIONS).parquet(str(gold / "year_totals"))
-        grid.coalesce(1).write.mode("overwrite").options(**PARQUET_WRITE_OPTIONS).parquet(str(gold / "topic_year"))
-        _write_json_atomic(gold / "_manifest.json", {
+        staging.mkdir(parents=True)
+        _write_parquet(totals, staging / "year_totals")
+        _write_parquet(grid, staging / "topic_year")
+        staged_rows = spark.read.parquet(str(staging / "topic_year")).count()
+        staged_years = spark.read.parquet(str(staging / "year_totals")).count()
+        if (staged_rows, staged_years) != (summary.rows, last_year - first_year + 1):
+            raise GoldError("Staged Gold tables do not match the computed summary")
+        _publish(gold, staging, {
             "gold_version": GOLD_VERSION,
             "silver_schema_version": _silver_schema_version(silver_root),
             **years,
@@ -232,11 +285,14 @@ def build_gold(
             "labeled_rows": summary.labeled_rows,
             "positive_rows": summary.positive_rows,
             "taxonomy_snapshot": {"ingested_at_min": snapshot["min"], "ingested_at_max": snapshot["max"]},
+            "feature_columns": list(FEATURE_COLUMNS),
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         return summary
     finally:
-        spark.catalog.clearCache()
+        shutil.rmtree(staging, ignore_errors=True)
+        for frame in cached:
+            frame.unpersist()
 
 
 def main() -> None:

@@ -62,7 +62,12 @@ A training row is valid for an evaluation window starting at year E when `label_
   Silver.
   Evidence: 208 passed (writer full suite). Real data: universe 300,171 publications (no duplicate source_id),
   3,492 topics, 52,380 rows, 3,308 labelable, 289 positives — matches the independent calculation.
-- [ ] GD-2 Features with tests proving no feature reads years after t; NULL lags before 2011.
+- [x] GD-2 Features with tests proving no feature reads years after t; NULL lags before 2011.
+  Evidence: 219 passed (writer); parent spot check of gold tests passed. Real data unchanged (52,380 / 3,308 / 289).
+  Deviation: `prevalence_percentile_t` ranks only topics observed by t (dense-grid rank leaked; caught by the
+  leakage test). Review follow-ups from GD-1 applied: staged atomic publish, local unpersist, GoldError paths.
+  Signal check (labelable rows, mean by class): clearest gaps in growth_2y_past 0.40 vs 0.55,
+  consecutive_growth_years 1.00 vs 1.26, subfield_growth_1y 0.03 vs 0.10; volume features nearly identical.
 - [ ] GD-3 Run in the container, `documentacion/6.gold.md`, notebook section: class distribution,
   sensitivity grid (growth 0.30/0.50/0.70 × support 5/10/20), sample emergent topics for manual review.
 
