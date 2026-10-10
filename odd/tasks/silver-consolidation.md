@@ -21,16 +21,22 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
 
 ## Tasks
 - [x] SC-1 Freeze the dataset (scheduler stopped; no running containers on 2026-10-09).
-- [ ] SC-2 Recover stranded rows: Silver accepts terminal batches that hold pages; OpenAlex paused batches
+- [x] SC-2 Recover stranded rows: Silver accepts terminal batches that hold pages; OpenAlex paused batches
   with pages stay resumable when credits run low and honour `next_attempt_at`. Tests for both paths.
+  Evidence: commit ce9ea16; `pytest -q` in container → 152 passed. Per-source `TERMINAL_STATUSES` in
+  `src/spark_pipeline.py` (Scopus `quota_exceeded` stays excluded because Scopus resumes it). RDD assess:
+  medium, `under_budget` (pending in slice).
 - [x] SC-3 Explain the 17% OpenAlex rejection rate (breakdown by `rejection_reason`, source, year).
   Result (Spark over `silver/rejected` + `_compact/*-rejected-*`, 104,424 rows): every OpenAlex rejection
   is a duplicate — 89,263 `duplicate_source_id_previous_batch` (pages re-downloaded after batches restart
   from the last completed cursor; fixed by SC-2) and 14,111 `duplicate_source_id` within a batch. Scopus:
   1,048 duplicates, 2 `missing_title`. No valid record is lost; the cost was wasted API quota. Documented,
   no code fix beyond SC-2.
-- [ ] SC-4 Silver v4 flags: `matches_common_query`, `is_eligible`, `work_type_norm`. Tests.
-- [ ] SC-5 Measure and document sampling bias and limitations in `documentacion/`.
+- [x] SC-4 Silver v4 flags: `matches_common_query`, `is_eligible`, `work_type_norm`. Tests.
+  Evidence: 167 passed (writer, full suite); parent spot check flags + criteria tests 18 passed.
+- [x] SC-5 Measure and document sampling bias and limitations in `documentacion/`.
+  Evidence: `documentacion/5.limitaciones-muestreo.md`; OpenAlex order verified on Bronze pages (relevance and
+  citations fall from first to last page, 2019-2024). Index links fixed after the renumbering.
 - [ ] SC-6 Quality report in `notebooks/openalex_pipeline_evidence.ipynb`.
 
 ## Acceptance criteria
@@ -49,6 +55,9 @@ A read-only audit (2026-10-09) found the code sound but the dataset not ready:
 
 ## Route log
 - SC-1 inline (state check only).
+- SC-2 delegated writer (3+ non-trivial files); parent renamed the compaction import inline.
+- SC-3 inline (one Spark query in the existing image, read-only data mount).
+- SC-4 delegated writer (rules, columns, schema bump, tests).
 
 ## Next step
 SC-3 analysis (inline, Spark in container) and SC-2 (delegated writer).
