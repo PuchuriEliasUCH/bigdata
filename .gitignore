@@ -1,7 +1,40 @@
+# Secrets (API keys for OpenAlex/Scopus)
 .env
-.gitpeek
-__pycache__/
-.pytest_cache/
-.ipynb_checkpoints/
+.env.*
+!.env.example
+
+# Pipeline data lake (Bronze/Silver/Gold are regenerated, never versioned)
 data/
+
+# Python
+__pycache__/
 *.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Spark local artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# Local tooling
+.gitpeek
+.atl/
+.codegraph/
+.claude/settings.local.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
