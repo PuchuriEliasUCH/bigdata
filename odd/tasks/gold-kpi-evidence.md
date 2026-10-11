@@ -37,7 +37,8 @@ Volumes are sample counts (about 6.4% of the planned universe per year); rates, 
   `PYSPARK_PYTHON` to the kernel interpreter and print the data root relative to the checkout.
 
 ## Acceptance criteria
-- The notebook executes top to bottom with no errors in the container (`documentacion/5.operacion.md`).
+- The notebook executes top to bottom with no errors in both modes: locally (no `/app/src`: checkout paths,
+  `.venv` kernel) and in the container (`/app`, `/data`, command in `documentacion/5.operacion.md`).
 - Sections 1–7 keep their results (52,380 rows, 3,308 labelable, 289 positives).
 - `pytest tests/test_project_artifacts.py` passes.
 
@@ -66,5 +67,13 @@ Created 2026-10-10. Delivery strategy: commits on `main` (user preference, 2026-
   sampling artifact: population +8.2%). Sample topics correlate 0.96 with sample size. Executed locally with the
   `.venv` kernel (Python 3.11) and the system Python 3.14 first on PATH: no errors, outputs carry no absolute
   local paths. Artifact tests: 3 passed.
+
+- [x] K7 Close review warnings: `os.path.relpath` for the printed data root (never raises), assert that
+  `plan_total` exists, is positive and covers `n_total`, compute the sample-topics correlation in cell 8.1
+  (0.96), and pin `PYSPARK_PYTHON` in the OpenAlex notebook setup too. Gold notebook executed in both modes
+  with identical KPIs: local (`container=False data=data`, local[2], 2g) committed; container
+  (`container=True data=/data`, local[*], 4g; capped 4 CPUs / 6 GB) to a scratch copy, no errors. OpenAlex
+  notebook: setup logic checked locally (paths and PYSPARK_PYTHON); not re-executed, its saved outputs are
+  unchanged and its Spark work is heavy on a laptop.
 
 Next step: review of the work-unit commit; push is the user's call.
