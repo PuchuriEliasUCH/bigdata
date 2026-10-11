@@ -112,7 +112,8 @@ Notebooks de evidencia (solo lectura, no llaman a ninguna API ni leen credencial
   calidad Bronze → Silver v4 (lotes, ventanas de Scopus, procesamiento, cobertura, indicadores,
   rechazos, fracción muestreada y solapamiento por DOI).
 - [`notebooks/gold_evidence.ipynb`](notebooks/gold_evidence.ipynb): manifiesto de Gold, clases,
-  sensibilidad de la etiqueta, particiones temporales, variables por clase y tópicos emergentes.
+  sensibilidad de la etiqueta, particiones temporales, variables por clase, tópicos emergentes e
+  indicadores (KPI) de crecimiento, concentración, perfil de la producción, emergencia y subcampos.
 
 ## Estructura relevante
 
