@@ -31,6 +31,10 @@ Volumes are sample counts (about 6.4% of the planned universe per year); rates, 
 - [x] K3 Add section 8 (KPIs) with invariant checks (sum of `n_t` equals `n_total`; prevalences sum to 1).
 - [x] K4 Execute the notebook with the documented container command and copy the executed notebook back.
 - [x] K5 Document the KPIs in `documentacion/4.gold.md` and the README line.
+- [x] K6 Correct the KPIs after self-review (reopened K3/K5): growth on `plan_total` (population) instead of the
+  sample `n_total`; state that sample KPIs describe the top-by-relevance literature, not the field; drop sample
+  topics from the headline KPIs; fix the 8.6 count label; remove the unverified "shift to journals" claim; set
+  `PYSPARK_PYTHON` to the kernel interpreter and print the data root relative to the checkout.
 
 ## Acceptance criteria
 - The notebook executes top to bottom with no errors in the container (`documentacion/5.operacion.md`).
@@ -56,5 +60,11 @@ Created 2026-10-10. Delivery strategy: commits on `main` (user preference, 2026-
   fail locally with PYTHON_VERSION_MISMATCH (worker 3.14, driver 3.11): environment, not code.
 - Correction recorded: subfield growth is reported as share of the year's publications, not counts; with
   counts every subfield grew because the sample doubled between 2023 and 2025.
+
+- K6: self-review against `documentacion/6.limitaciones-muestreo.md` found that growth computed on `n_total`
+  mixed real growth with sampling (CAGR 20.9% -> 20.4%, 2025 YoY +57.2% -> +49.1%, and the 2015 "decline" is a
+  sampling artifact: population +8.2%). Sample topics correlate 0.96 with sample size. Executed locally with the
+  `.venv` kernel (Python 3.11) and the system Python 3.14 first on PATH: no errors, outputs carry no absolute
+  local paths. Artifact tests: 3 passed.
 
 Next step: review of the work-unit commit; push is the user's call.
