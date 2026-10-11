@@ -76,4 +76,10 @@ Created 2026-10-10. Delivery strategy: commits on `main` (user preference, 2026-
   notebook: setup logic checked locally (paths and PYSPARK_PYTHON); not re-executed, its saved outputs are
   unchanged and its Spark work is heavy on a laptop.
 
+- [x] K8 Re-execute the OpenAlex notebook so its outputs match its setup cell. Container run (4 CPUs, 6 GB):
+  no errors. Local run with local[2] and 2g failed in cell 6 (Silver read) with `Java heap space`; the local
+  default driver memory is now 4g in both notebooks (cores stay at 2 locally). Local runs under a 7 GB cgroup
+  cap: both notebooks without errors; OpenAlex outputs identical to the container run apart from the
+  configuration line, Gold outputs unchanged. Executed local versions committed. Full suite: 222 passed.
+
 Next step: review of the work-unit commit; push is the user's call.
